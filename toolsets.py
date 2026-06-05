@@ -48,8 +48,8 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
-    # Session history search
-    "session_search",
+    # Session and captured chat history search
+    "session_search", "chat_context",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -223,8 +223,8 @@ TOOLSETS = {
     },
     
     "session_search": {
-        "description": "Search and recall past conversations with summarization",
-        "tools": ["session_search"],
+        "description": "Search and recall past conversations and captured chat context",
+        "tools": ["session_search", "chat_context"],
         "includes": []
     },
     

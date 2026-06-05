@@ -901,6 +901,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
+        elif function_name == "chat_context":
+            session_db = agent._get_session_db_for_recall()
+            if not session_db:
+                from hermes_state import format_session_db_unavailable
+                function_result = json.dumps({"success": False, "error": format_session_db_unavailable()})
+            else:
+                from tools.chat_context_tool import chat_context as _chat_context
+                function_result = _chat_context(
+                    limit=function_args.get("limit", 50),
+                    platform=function_args.get("platform"),
+                    chat_id=function_args.get("chat_id"),
+                    thread_id=function_args.get("thread_id"),
+                    include_bots=function_args.get("include_bots", True),
+                    db=session_db,
+                    current_platform=getattr(agent, "platform", None),
+                    current_chat_id=getattr(agent, "_chat_id", None),
+                    current_thread_id=getattr(agent, "_thread_id", None),
+                )
+            tool_duration = time.time() - tool_start_time
+            if agent._should_emit_quiet_tool_messages():
+                agent._vprint(f"  {_get_cute_tool_message_impl('chat_context', function_args, tool_duration, result=function_result)}")
         elif function_name == "memory":
             target = function_args.get("target", "memory")
             from tools.memory_tool import memory_tool as _memory_tool

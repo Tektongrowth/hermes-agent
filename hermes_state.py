@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -294,6 +294,27 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS platform_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    thread_id TEXT,
+    chat_type TEXT,
+    chat_name TEXT,
+    user_id TEXT,
+    user_name TEXT,
+    is_bot INTEGER DEFAULT 0,
+    message_id TEXT NOT NULL,
+    update_id TEXT,
+    message_type TEXT,
+    text TEXT,
+    reply_to_message_id TEXT,
+    reply_to_text TEXT,
+    raw_summary TEXT,
+    timestamp REAL NOT NULL,
+    captured_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS compression_locks (
     session_id TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
@@ -305,6 +326,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_platform_messages_scope_time
+    ON platform_messages(platform, chat_id, thread_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_platform_messages_sender_time
+    ON platform_messages(platform, user_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_messages_unique
+    ON platform_messages(platform, chat_id, IFNULL(thread_id, ''), message_id);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 """
 
@@ -1879,6 +1906,192 @@ class SessionDB:
         else:
             s["preview"] = ""
         return s
+
+    # =========================================================================
+    # Platform chat history storage
+    # =========================================================================
+
+    @staticmethod
+    def _coerce_timestamp(value: Any = None) -> float:
+        """Convert datetimes/numbers to epoch seconds for SQLite storage."""
+        if value is None:
+            return time.time()
+        if hasattr(value, "timestamp"):
+            try:
+                return float(value.timestamp())
+            except Exception:
+                return time.time()
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return time.time()
+
+    def record_platform_message(
+        self,
+        *,
+        platform: str,
+        chat_id: str,
+        message_id: str,
+        thread_id: str = None,
+        chat_type: str = None,
+        chat_name: str = None,
+        user_id: str = None,
+        user_name: str = None,
+        is_bot: bool = False,
+        update_id: Any = None,
+        message_type: str = None,
+        text: str = None,
+        reply_to_message_id: str = None,
+        reply_to_text: str = None,
+        raw_summary: Any = None,
+        timestamp: Any = None,
+    ) -> int:
+        """Record one inbound platform message idempotently.
+
+        This is intentionally separate from the conversation transcript tables:
+        it captures chat context the gateway observed, including group chatter
+        that may not become an agent turn.
+        """
+        if not platform or not chat_id or not message_id:
+            raise ValueError("platform, chat_id, and message_id are required")
+
+        platform = str(platform)
+        chat_id = str(chat_id)
+        message_id = str(message_id)
+        thread_id = str(thread_id) if thread_id not in (None, "") else None
+        raw_summary_text = None
+        if raw_summary is not None:
+            raw_summary_text = raw_summary if isinstance(raw_summary, str) else json.dumps(raw_summary, default=str)
+        ts = self._coerce_timestamp(timestamp)
+        captured_at = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_messages (
+                    platform, chat_id, thread_id, chat_type, chat_name,
+                    user_id, user_name, is_bot, message_id, update_id,
+                    message_type, text, reply_to_message_id, reply_to_text,
+                    raw_summary, timestamp, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform, chat_id, thread_id, chat_type, chat_name,
+                    str(user_id) if user_id is not None else None,
+                    user_name, 1 if is_bot else 0, message_id,
+                    str(update_id) if update_id is not None else None,
+                    message_type, text, reply_to_message_id, reply_to_text,
+                    raw_summary_text, ts, captured_at,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM platform_messages
+                WHERE platform = ? AND chat_id = ? AND IFNULL(thread_id, '') = IFNULL(?, '')
+                  AND message_id = ?
+                """,
+                (platform, chat_id, thread_id, message_id),
+            ).fetchone()
+            return int(row[0])
+
+        return self._execute_write(_do)
+
+    def get_recent_platform_messages(
+        self,
+        *,
+        platform: str,
+        chat_id: str,
+        thread_id: str = None,
+        limit: int = 50,
+        include_bots: bool = True,
+        before_message_id: str = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent captured platform messages in chronological order."""
+        if not platform or not chat_id:
+            raise ValueError("platform and chat_id are required")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(200, limit))
+        params: list[Any] = [str(platform), str(chat_id)]
+        where = ["platform = ?", "chat_id = ?"]
+        if thread_id not in (None, ""):
+            where.append("IFNULL(thread_id, '') = ?")
+            params.append(str(thread_id))
+        if not include_bots:
+            where.append("is_bot = 0")
+        if before_message_id:
+            row = self._conn.execute(
+                """
+                SELECT timestamp FROM platform_messages
+                WHERE platform = ? AND chat_id = ? AND message_id = ?
+                LIMIT 1
+                """,
+                (str(platform), str(chat_id), str(before_message_id)),
+            ).fetchone()
+            if row:
+                where.append("timestamp < ?")
+                params.append(float(row[0]))
+        sql = f"""
+            SELECT * FROM platform_messages
+            WHERE {' AND '.join(where)}
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        results = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["is_bot"] = bool(item.get("is_bot"))
+            item["sender"] = item.get("user_name") or item.get("user_id") or "unknown"
+            results.append(item)
+        return results
+
+    def prune_platform_messages(
+        self,
+        *,
+        retention_days: int = 30,
+        max_messages_per_chat: int = 2000,
+    ) -> Dict[str, int]:
+        """Prune captured platform chat history by age and count."""
+        deleted_by_age = 0
+        deleted_by_count = 0
+
+        def _do(conn):
+            nonlocal deleted_by_age, deleted_by_count
+            if retention_days is not None:
+                cutoff = time.time() - (int(retention_days) * 86400)
+                cur = conn.execute(
+                    "DELETE FROM platform_messages WHERE timestamp < ?",
+                    (cutoff,),
+                )
+                deleted_by_age = int(cur.rowcount or 0)
+            if max_messages_per_chat is not None:
+                keep = max(1, int(max_messages_per_chat))
+                cur = conn.execute(
+                    """
+                    DELETE FROM platform_messages
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY platform, chat_id, IFNULL(thread_id, '')
+                                       ORDER BY timestamp DESC, id DESC
+                                   ) AS rn
+                            FROM platform_messages
+                        ) ranked
+                        WHERE rn > ?
+                    )
+                    """,
+                    (keep,),
+                )
+                deleted_by_count = int(cur.rowcount or 0)
+            return {"deleted_by_age": deleted_by_age, "deleted_by_count": deleted_by_count}
+
+        return self._execute_write(_do)
 
     # =========================================================================
     # Message storage

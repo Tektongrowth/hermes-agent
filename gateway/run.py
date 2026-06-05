@@ -7372,6 +7372,41 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    def _record_incoming_platform_message(self, event: MessageEvent) -> None:
+        """Best-effort capture of inbound platform messages for chat_context."""
+        try:
+            if bool(getattr(event, "internal", False)):
+                return
+            session_db = getattr(self, "_session_db", None)
+            source = getattr(event, "source", None)
+            if session_db is None or source is None:
+                return
+            platform = getattr(getattr(source, "platform", None), "value", getattr(source, "platform", None))
+            chat_id = getattr(source, "chat_id", None)
+            message_id = getattr(event, "message_id", None) or getattr(source, "message_id", None)
+            if not platform or not chat_id or not message_id:
+                return
+            message_type = getattr(getattr(event, "message_type", None), "value", getattr(event, "message_type", None))
+            session_db.record_platform_message(
+                platform=str(platform),
+                chat_id=str(chat_id),
+                thread_id=str(getattr(source, "thread_id", "")) if getattr(source, "thread_id", None) else None,
+                chat_type=getattr(source, "chat_type", None),
+                chat_name=getattr(source, "chat_name", None),
+                user_id=str(getattr(source, "user_id", "")) if getattr(source, "user_id", None) else None,
+                user_name=getattr(source, "user_name", None),
+                is_bot=bool(getattr(source, "is_bot", False)),
+                message_id=str(message_id),
+                update_id=getattr(event, "platform_update_id", None),
+                message_type=str(message_type) if message_type else None,
+                text=getattr(event, "text", None) or None,
+                reply_to_message_id=getattr(event, "reply_to_message_id", None),
+                reply_to_text=getattr(event, "reply_to_text", None),
+                timestamp=getattr(event, "timestamp", None),
+            )
+        except Exception as exc:
+            logger.debug("chat_context platform message capture skipped: %s", exc)
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -7422,6 +7457,7 @@ class GatewayRunner:
                         source.platform.value if source.platform else "unknown",
                         source.chat_id or "unknown",
                     )
+                    self._record_incoming_platform_message(event)
                     return None
                 if _action == "rewrite":
                     _new_text = _result.get("text")
@@ -7431,6 +7467,8 @@ class GatewayRunner:
                     break
                 if _action == "allow":
                     break
+
+        self._record_incoming_platform_message(event)
 
         if is_internal:
             pass

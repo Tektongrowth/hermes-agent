@@ -48,7 +48,7 @@ def _ra():
 
 
 AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
-    {"todo", "session_search", "memory", "clarify", "delegate_task"}
+    {"todo", "session_search", "chat_context", "memory", "clarify", "delegate_task"}
 )
 
 
@@ -1709,6 +1709,25 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 sort=function_args.get("sort"),
                 db=session_db,
                 current_session_id=agent.session_id,
+            )
+        )
+    elif function_name == "chat_context":
+        session_db = agent._get_session_db_for_recall()
+        if not session_db:
+            from hermes_state import format_session_db_unavailable
+            return _finish_agent_tool(json.dumps({"success": False, "error": format_session_db_unavailable()}))
+        from tools.chat_context_tool import chat_context as _chat_context
+        return _finish_agent_tool(
+            _chat_context(
+                limit=function_args.get("limit", 50),
+                platform=function_args.get("platform"),
+                chat_id=function_args.get("chat_id"),
+                thread_id=function_args.get("thread_id"),
+                include_bots=function_args.get("include_bots", True),
+                db=session_db,
+                current_platform=getattr(agent, "platform", None),
+                current_chat_id=getattr(agent, "_chat_id", None),
+                current_thread_id=getattr(agent, "_thread_id", None),
             )
         )
     elif function_name == "memory":
