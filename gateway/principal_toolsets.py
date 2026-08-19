@@ -14,6 +14,38 @@ def _normalize_toolsets(value: Any) -> Optional[list[str]]:
     return sorted(set(value))
 
 
+def _valid_platform_policy(policy: Any) -> bool:
+    """Validate a complete platform policy before granting any capability.
+
+    A principal policy is an authorization boundary, not a best-effort config.
+    Validate every entry, including mappings that do not match the current
+    sender, so a typo cannot silently preserve a privileged default grant.
+    """
+    if not isinstance(policy, dict):
+        return False
+    allowed_keys = {"default", "users", "roles", "guilds"}
+    if any(not isinstance(key, str) or key not in allowed_keys for key in policy):
+        return False
+    if "default" in policy and _normalize_toolsets(policy["default"]) is None:
+        return False
+    if "guilds" in policy:
+        guilds = policy["guilds"]
+        if not isinstance(guilds, list) or any(not isinstance(guild, str) for guild in guilds):
+            return False
+    for mapping_name in ("users", "roles"):
+        if mapping_name not in policy:
+            continue
+        mapping = policy[mapping_name]
+        if not isinstance(mapping, dict):
+            return False
+        if any(
+            not isinstance(key, str) or _normalize_toolsets(value) is None
+            for key, value in mapping.items()
+        ):
+            return False
+    return True
+
+
 def principal_policy_present(user_config: Any, platform_key: str) -> bool:
     """Return whether this process must enforce principal policy locally.
 
@@ -50,7 +82,7 @@ def principal_guild_authorized(user_config: Any, platform_key: str, source: Any)
         return False
     platform_name = str(getattr(platform_key, "value", platform_key))
     policy = policies.get(platform_name)
-    if not isinstance(policy, dict):
+    if not _valid_platform_policy(policy):
         return False
     guilds = policy.get("guilds")
     if not isinstance(guilds, list) or any(not isinstance(guild, str) for guild in guilds):
@@ -91,7 +123,7 @@ def resolve_principal_toolsets(
         return fallback
 
     policy = policies[platform_name]
-    if not isinstance(policy, dict):
+    if not _valid_platform_policy(policy):
         return []
 
     # Once a platform policy is explicitly present, legacy platform-wide

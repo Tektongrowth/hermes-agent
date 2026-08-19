@@ -16,7 +16,12 @@ import pytest
 
 from gateway import run as gateway_run
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent, MessageType, merge_pending_message_event
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    merge_pending_message_event,
+)
 from gateway.principal_toolsets import resolve_principal_toolsets
 from gateway.session import SessionSource, SessionStore
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
@@ -163,6 +168,22 @@ def test_pending_text_merge_preserves_event_from_a_different_principal():
     assert pending[session_key].text == "first user's text"
 
 
+def test_text_debounce_does_not_merge_a_role_revoked_users_turn():
+    """A fresh reader turn must not inherit an earlier admin role snapshot."""
+    before_revocation = _event(
+        source=_source(user_id="same-user", role_ids=("role-admin",)),
+        text="admin follow-up",
+    )
+    after_revocation = _event(
+        source=_source(user_id="same-user", role_ids=("role-reader",)),
+        text="reader follow-up",
+    )
+
+    assert not BasePlatformAdapter._can_merge_text_debounce_events(
+        object(), before_revocation, after_revocation
+    )
+
+
 def test_runner_queues_a_different_principal_after_the_existing_pending_turn():
     """A principal conflict preserves both complete turns in FIFO order."""
     runner = object.__new__(gateway_run.GatewayRunner)
@@ -275,6 +296,8 @@ async def test_direct_steer_command_cannot_cross_principal_toolset_boundary():
         patch("gateway.run._load_gateway_config", return_value=config),
         patch("gateway.run._resolve_enabled_toolsets", return_value=["web"]) as resolve,
     ):
+        session_key = runner._session_key_for_source(event.source)
+        runner._running_agents = {session_key: running_agent}
         result = await runner._handle_message(event)
 
     resolve.assert_called_once_with(config, event.source)
@@ -309,6 +332,8 @@ async def test_priority_steer_path_queues_when_principal_toolsets_differ():
         patch("gateway.run._load_gateway_config", return_value=config),
         patch("gateway.run._resolve_enabled_toolsets", return_value=["web"]) as resolve,
     ):
+        session_key = runner._session_key_for_source(event.source)
+        runner._running_agents = {session_key: running_agent}
         result = await runner._handle_message(event)
 
     assert result is None
@@ -403,6 +428,39 @@ def test_absent_discord_principal_policy_preserves_platform_fallback(config):
     ]
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [
+        pytest.param(
+            {"default": ["terminal"], "users": {"other-user": "not-a-list"}},
+            id="unmatched-user-value",
+        ),
+        pytest.param(
+            {"default": ["terminal"], "roles": {"other-role": "not-a-list"}},
+            id="unmatched-role-value",
+        ),
+        pytest.param(
+            {"default": ["terminal"], "guilds": "cjs-guild"},
+            id="guilds-not-a-list",
+        ),
+        pytest.param(
+            {"default": ["terminal"], "guilds": [123]},
+            id="guild-id-not-a-string",
+        ),
+    ],
+)
+def test_any_malformed_entry_in_present_policy_denies_every_grant(policy):
+    """Bad unused config must not let a privileged default survive parsing."""
+    config = {"platform_principal_toolsets": {"discord": policy}}
+
+    assert resolve_principal_toolsets(
+        config,
+        "discord",
+        _source(user_id="crew-user", role_ids=("role-crew",)),
+        ["web"],
+    ) == []
+
+
 def test_principal_policy_isolates_shared_discord_thread_session_keys():
     """Role-scoped tools do not make a shared owner transcript safe to reuse."""
     runner = object.__new__(gateway_run.GatewayRunner)
@@ -426,8 +484,69 @@ def test_principal_policy_isolates_shared_discord_thread_session_keys():
         crew_key = runner._session_key_for_source(crew)
 
     assert owner_key != crew_key
-    assert owner_key.endswith(":owner")
-    assert crew_key.endswith(":crew")
+    assert ":owner:principal:" in owner_key
+    assert ":crew:principal:" in crew_key
+
+
+def test_principal_policy_rotates_session_key_when_a_users_roles_change():
+    """Role revocation must create a new transcript boundary for that user."""
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner.config = GatewayConfig(
+        group_sessions_per_user=True,
+        thread_sessions_per_user=False,
+    )
+    runner.session_store = SimpleNamespace(
+        _generate_session_key=Mock(return_value="unsafe-shared-session"),
+    )
+    config = {
+        "platform_principal_toolsets": {
+            "discord": {
+                "default": [],
+                "roles": {
+                    "role-admin": ["terminal"],
+                    "role-crew": ["synkedup_read"],
+                },
+            }
+        }
+    }
+    before_revocation = _source(user_id="same-user", role_ids=("role-admin",))
+    after_revocation = _source(user_id="same-user", role_ids=("role-crew",))
+
+    with patch("gateway.run._load_gateway_config", return_value=config):
+        admin_key = runner._session_key_for_source(before_revocation)
+        crew_key = runner._session_key_for_source(after_revocation)
+
+    assert admin_key != crew_key
+    assert "unsafe-shared-session" not in {admin_key, crew_key}
+
+
+@pytest.mark.asyncio
+async def test_principal_policy_blocks_resume_of_another_users_session():
+    """A Crew member cannot attach an Owner transcript to their session key."""
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._session_db = SimpleNamespace(
+        get_session=Mock(return_value={"id": "owner-session", "user_id": "owner"}),
+        resolve_resume_session_id=Mock(return_value="owner-session"),
+        resolve_session_by_title=Mock(return_value=None),
+    )
+    runner.session_store = MagicMock()
+    event = _event(
+        source=_source(user_id="crew", role_ids=("role-crew",)),
+        text="/resume owner-session",
+    )
+    config = {
+        "platform_principal_toolsets": {
+            "discord": {"default": [], "roles": {"role-crew": ["synkedup_read"]}},
+        }
+    }
+
+    with patch("gateway.run._load_gateway_config", return_value=config):
+        result = await runner._handle_resume_command(event)
+
+    assert "no session found" in result.lower() or "not authorized" in result.lower()
+    runner.session_store.switch_session.assert_not_called()
 
 
 def test_principal_policy_allows_only_explicit_discord_guild_conversation_access(monkeypatch):

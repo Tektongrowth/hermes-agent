@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -1496,6 +1497,25 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+def _principal_session_key_suffix(source: "SessionSource") -> str:
+    """Return an opaque snapshot marker for a principal-policy transcript.
+
+    Role grants are request-scoped and deliberately excluded from serialized
+    session sources. The session key still needs a stable role-snapshot marker
+    while a principal policy is active, otherwise a user who loses a privileged
+    role retains the privileged transcript under the same user-only key.
+    """
+    raw_roles = getattr(source, "principal_role_ids", ()) or ()
+    if isinstance(raw_roles, (str, bytes)):
+        normalized = "<invalid>"
+    else:
+        try:
+            normalized = ",".join(sorted({str(role_id) for role_id in raw_roles if role_id is not None}))
+        except TypeError:
+            normalized = "<invalid>"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def _resolve_enabled_toolsets(user_config: Any, source: "SessionSource") -> list[str]:
     """Resolve platform defaults and any principal-scoped toolset policy."""
     from gateway.principal_toolsets import resolve_principal_toolsets
@@ -2391,11 +2411,12 @@ class GatewayRunner:
 
             user_config = _load_gateway_config()
             if principal_policy_present(user_config, _platform_config_key(source.platform)):
-                return build_session_key(
+                base_key = build_session_key(
                     source,
                     group_sessions_per_user=True,
                     thread_sessions_per_user=True,
                 )
+                return f"{base_key}:principal:{_principal_session_key_suffix(source)}"
         except Exception:
             # A policy-resolution failure must not manufacture a shared key.
             # Fall through only when normal configuration/session resolution is
@@ -13974,6 +13995,15 @@ class GatewayRunner:
 
         source = event.source
         session_key = self._session_key_for_source(source)
+        try:
+            from gateway.principal_toolsets import principal_policy_present
+            principal_policy_active = principal_policy_present(
+                _load_gateway_config(), _platform_config_key(source.platform)
+            )
+        except Exception:
+            # A policy lookup failure must not expose cross-principal history.
+            principal_policy_active = True
+        principal_user_id = str(source.user_id or "")
         name = event.get_command_args().strip()
 
         # Strip common outer brackets/quotes users may type literally from the
@@ -13989,6 +14019,11 @@ class GatewayRunner:
         def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
             sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
+            if principal_policy_active:
+                sessions = [
+                    session for session in sessions
+                    if str(session.get("user_id") or "") == principal_user_id
+                ]
             return [s for s in sessions if s.get("title")][:10]
 
         if not name:
@@ -14038,6 +14073,18 @@ class GatewayRunner:
             target_id = self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
+
+        if principal_policy_active:
+            try:
+                target_session = self._session_db.get_session(target_id)
+            except Exception:
+                target_session = None
+            if (
+                not isinstance(target_session, dict)
+                or str(target_session.get("user_id") or "") != principal_user_id
+            ):
+                # Do not reveal whether another principal's session exists.
+                return t("gateway.resume.not_found", name=name)
 
         # Check if already on that session
         current_entry = self.session_store.get_or_create_session(source)

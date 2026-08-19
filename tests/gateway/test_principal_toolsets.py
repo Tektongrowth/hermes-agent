@@ -190,6 +190,7 @@ def test_discord_slash_event_uses_authenticated_member_roles_not_command_text():
 
     interaction = SimpleNamespace(
         channel_id=123,
+        guild=SimpleNamespace(id=789),
         channel=SimpleNamespace(
             id=123,
             name="general",
@@ -210,6 +211,7 @@ def test_discord_slash_event_uses_authenticated_member_roles_not_command_text():
 
     assert isinstance(event.source.principal_role_ids, tuple)
     assert set(event.source.principal_role_ids) == {"10", "20"}
+    assert event.source.guild_id == "789"
     assert "999" not in event.source.principal_role_ids
 
 

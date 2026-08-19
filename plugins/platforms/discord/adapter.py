@@ -3501,6 +3501,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # Get channel topic (if available).
         # For forum threads, inherit the parent forum's topic.
         chat_topic = self._get_effective_topic(interaction.channel, is_thread=is_thread)
+        guild = getattr(interaction, "guild", None) or getattr(interaction.channel, "guild", None)
+        guild_id = str(getattr(guild, "id", "") or "") or None
 
         source = self.build_source(
             chat_id=str(interaction.channel_id),
@@ -3510,6 +3512,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            guild_id=guild_id,
             principal_role_ids=_principal_role_ids(interaction.user),
         )
 

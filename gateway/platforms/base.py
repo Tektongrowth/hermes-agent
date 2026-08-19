@@ -3447,10 +3447,17 @@ class BasePlatformAdapter(ABC):
                 return None
             platform = _platform_name(getattr(source, "platform", None))
             sender = getattr(source, "user_id_alt", None) or getattr(source, "user_id", None)
+            role_snapshot = getattr(source, "principal_role_ids", ()) or ()
+            if isinstance(role_snapshot, (str, bytes)):
+                return None
+            try:
+                roles = tuple(sorted({str(role_id) for role_id in role_snapshot if role_id is not None}))
+            except TypeError:
+                return None
             if sender:
-                return (platform, str(sender))
+                return (platform, str(sender), *roles)
             if getattr(source, "chat_type", None) in {"dm", "private"} and getattr(source, "chat_id", None):
-                return (platform, "dm", str(source.chat_id))
+                return (platform, "dm", str(source.chat_id), *roles)
             return None
 
         existing_sender = _identity(existing)
