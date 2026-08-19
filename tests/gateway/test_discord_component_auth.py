@@ -228,3 +228,16 @@ def test_model_picker_view_empty_allowlists_allow_everyone():
     )
     assert view.allowed_role_ids == set()
     assert view._check_auth(_interaction(99999)) is True
+
+
+def test_privileged_views_fail_closed_when_policy_has_no_admin_mapping():
+    async def _noop(*_a, **_k):
+        return ""
+
+    update = UpdatePromptView(session_key="s", allowed_user_ids=set(), fail_closed=True)
+    model = ModelPickerView(
+        providers=[], current_model="m", current_provider="p", session_key="s",
+        on_model_selected=_noop, allowed_user_ids=set(), fail_closed=True,
+    )
+    assert update._check_auth(_interaction(99999)) is False
+    assert model._check_auth(_interaction(99999)) is False

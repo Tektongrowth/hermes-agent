@@ -7665,6 +7665,20 @@ class GatewayRunner:
         _quick_key = self._session_key_for_source(source)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
+            if source.platform == Platform.DISCORD:
+                try:
+                    from gateway.principal_toolsets import (
+                        principal_admin_authorized,
+                        principal_policy_present,
+                    )
+                    principal_config = _load_gateway_config()
+                    if (
+                        principal_policy_present(principal_config, "discord")
+                        and not principal_admin_authorized(principal_config, "discord", source)
+                    ):
+                        return "⛔ Only a Mason Admin can answer a pending update prompt."
+                except Exception:
+                    return "⛔ Only a Mason Admin can answer a pending update prompt."
             raw = (event.text or "").strip()
             # Accept /approve and /deny as shorthand for yes/no
             cmd = event.get_command()

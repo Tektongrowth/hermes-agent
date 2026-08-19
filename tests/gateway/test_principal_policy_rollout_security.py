@@ -77,6 +77,16 @@ def test_exec_and_slash_confirmation_views_use_the_dedicated_approval_allowlist(
     assert "self._approval_allowed_role_ids" in send_slash
 
 
+def test_thread_creation_and_update_interception_require_principal_admin():
+    discord_module = load_plugin_adapter("discord")
+    thread_source = inspect.getsource(discord_module.DiscordAdapter._handle_thread_create_slash)
+    dispatch_source = inspect.getsource(discord_module.DiscordAdapter._dispatch_thread_session)
+    update_source = inspect.getsource(gateway_run.GatewayRunner._handle_message)
+    assert "_principal_control_authorized" in thread_source
+    assert "guild_id=" in dispatch_source
+    assert "Only a Mason Admin can answer a pending update prompt" in update_source
+
+
 def test_principal_policy_requires_an_exact_admin_for_slash_commands(monkeypatch):
     """Crew may converse but cannot operate gateway slash commands."""
     runner = object.__new__(gateway_run.GatewayRunner)

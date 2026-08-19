@@ -3564,6 +3564,21 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
         )
 
+    def _principal_control_authorized(self, source) -> bool:
+        """Require an exact policy admin for Discord control surfaces."""
+        try:
+            from hermes_cli.config import read_raw_config
+            from gateway.principal_toolsets import (
+                principal_admin_authorized,
+                principal_policy_present,
+            )
+            config = read_raw_config()
+            if principal_policy_present(config, "discord"):
+                return principal_admin_authorized(config, "discord", source)
+        except Exception:
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # Thread creation helpers
     # ------------------------------------------------------------------
@@ -3577,6 +3592,12 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> None:
         """Create a Discord thread from a slash command and start a session in it."""
         if not await self._check_slash_authorization(interaction, "/thread"):
+            return
+        source = self._build_slash_event(interaction, "/thread").source
+        if not self._principal_control_authorized(source):
+            await interaction.response.send_message(
+                "You're not authorized to create threads.", ephemeral=True
+            )
             return
         await interaction.response.defer(ephemeral=True)
         result = await self._create_thread(
@@ -3624,6 +3645,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Inherit forum topic when the thread was created inside a forum channel.
         _chan = getattr(interaction, "channel", None)
         chat_topic = self._get_effective_topic(_chan, is_thread=True) if _chan else None
+        guild = getattr(interaction, "guild", None) or getattr(_chan, "guild", None)
 
         source = self.build_source(
             chat_id=thread_id,
@@ -3633,6 +3655,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            guild_id=str(getattr(guild, "id", "") or "") or None,
             principal_role_ids=_principal_role_ids(interaction.user),
         )
 
@@ -4311,8 +4334,9 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             view = UpdatePromptView(
                 session_key=session_key,
-                allowed_user_ids=self._allowed_user_ids,
-                allowed_role_ids=self._allowed_role_ids,
+                allowed_user_ids=self._approval_allowed_user_ids,
+                allowed_role_ids=self._approval_allowed_role_ids,
+                fail_closed=self._approval_fail_closed,
             )
             msg = await channel.send(embed=embed, view=view)
             view._message = msg  # store for on_timeout expiration editing
@@ -4370,8 +4394,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 current_provider=current_provider,
                 session_key=session_key,
                 on_model_selected=on_model_selected,
-                allowed_user_ids=self._allowed_user_ids,
-                allowed_role_ids=self._allowed_role_ids,
+                allowed_user_ids=self._approval_allowed_user_ids,
+                allowed_role_ids=self._approval_allowed_role_ids,
+                fail_closed=self._approval_fail_closed,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5370,11 +5395,13 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            fail_closed: bool = False,
         ):
             super().__init__(timeout=300)
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.fail_closed = fail_closed
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
@@ -5470,6 +5497,7 @@ def _define_discord_view_classes() -> None:
             on_model_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            fail_closed: bool = False,
         ):
             super().__init__(timeout=120)
             self.providers = providers
@@ -5479,6 +5507,7 @@ def _define_discord_view_classes() -> None:
             self.on_model_selected = on_model_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.fail_closed = fail_closed
             self.resolved = False
             self._selected_provider: str = ""
 
