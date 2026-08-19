@@ -292,6 +292,11 @@ def _matching_session_cdp_route(browser_cfg: Dict[str, Any]) -> Optional[Dict[st
     is empty, so CLI and cron callers retain the normal global browser route.
     """
     routes = browser_cfg.get("cdp_routes", [])
+    if isinstance(routes, str):
+        try:
+            routes = json.loads(routes)
+        except (TypeError, ValueError):
+            return None
     if not isinstance(routes, list) or not routes:
         return None
 

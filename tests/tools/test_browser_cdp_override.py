@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -148,6 +149,28 @@ class TestSessionCdpRouting:
         }
 
         with patch("hermes_cli.config.read_raw_config", return_value=self._config(route)):
+            assert browser_tool._get_cdp_override() == self.RICO_WS
+
+    def test_routes_accept_json_string_from_config_cli(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+        from gateway.session_context import set_session_vars
+
+        set_session_vars(platform="discord", user_id=self.RICO_ID)
+        monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
+        route = {
+            "name": "rico-windows",
+            "platform": "discord",
+            "user_ids": [self.RICO_ID],
+            "cdp_url": self.RICO_WS,
+        }
+        cfg = {
+            "browser": {
+                "cdp_url": self.GLOBAL_WS,
+                "cdp_routes": json.dumps([route]),
+            }
+        }
+
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
             assert browser_tool._get_cdp_override() == self.RICO_WS
 
     def test_nonmatching_user_keeps_existing_global_override(self, monkeypatch):
