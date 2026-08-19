@@ -109,6 +109,21 @@ def principal_admin_authorized(user_config: Any, platform_key: str, source: Any)
     return isinstance(admins, list) and str(getattr(source, "user_id", "")) in admins
 
 
+def principal_admin_user_ids(user_config: Any, platform_key: str) -> Optional[set[str]]:
+    """Return exact component approvers for a present policy, or None if absent."""
+    if not principal_policy_present(user_config, platform_key):
+        return None
+    if not isinstance(user_config, dict):
+        return set()
+    policies = user_config.get("platform_principal_toolsets")
+    platform_name = str(getattr(platform_key, "value", platform_key))
+    policy = policies.get(platform_name) if isinstance(policies, dict) else None
+    if not _valid_platform_policy(policy):
+        return set()
+    admins = policy.get("admin_users", [])
+    return set(admins) if isinstance(admins, list) else set()
+
+
 def resolve_principal_toolsets(
     user_config: Any,
     platform_key: str,

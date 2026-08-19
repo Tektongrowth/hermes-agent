@@ -601,6 +601,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Conversation access and privileged confirmation buttons are separate.
         self._approval_allowed_user_ids: set = set()
         self._approval_allowed_role_ids: set = set()
+        self._approval_fail_closed = False
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
@@ -724,6 +725,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 if approval_roles_env
                 else set()
             )
+            try:
+                from hermes_cli.config import read_raw_config
+                from gateway.principal_toolsets import principal_admin_user_ids
+                policy_approvers = principal_admin_user_ids(read_raw_config(), "discord")
+            except Exception:
+                policy_approvers = set()
+            if policy_approvers is not None:
+                self._approval_allowed_user_ids = policy_approvers
+                self._approval_allowed_role_ids = set()
+                self._approval_fail_closed = True
 
             # Set up intents.
             # Message Content is required for normal text replies.
@@ -4144,6 +4155,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._approval_allowed_user_ids,
                 allowed_role_ids=self._approval_allowed_role_ids,
+                fail_closed=self._approval_fail_closed,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -4184,6 +4196,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 confirm_id=confirm_id,
                 allowed_user_ids=self._approval_allowed_user_ids,
                 allowed_role_ids=self._approval_allowed_role_ids,
+                fail_closed=self._approval_fail_closed,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5036,6 +5049,8 @@ def _component_check_auth(
     interaction,
     allowed_user_ids: Optional[set],
     allowed_role_ids: Optional[set],
+    *,
+    fail_closed: bool = False,
 ) -> bool:
     """Shared user-or-role OR semantics for component view button clicks.
 
@@ -5065,7 +5080,7 @@ def _component_check_auth(
     has_users = bool(user_set)
     has_roles = bool(role_set)
     if not has_users and not has_roles:
-        return True
+        return not fail_closed
 
     user = getattr(interaction, "user", None)
     if user is None:
@@ -5124,17 +5139,20 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            fail_closed: bool = False,
         ):
             super().__init__(timeout=300)  # 5-minute timeout
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.fail_closed = fail_closed
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             """Verify the user clicking is authorized."""
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                fail_closed=getattr(self, "fail_closed", False),
             )
 
         async def _resolve(
@@ -5244,17 +5262,20 @@ def _define_discord_view_classes() -> None:
             confirm_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            fail_closed: bool = False,
         ):
             super().__init__(timeout=300)
             self.session_key = session_key
             self.confirm_id = confirm_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.fail_closed = fail_closed
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                fail_closed=getattr(self, "fail_closed", False),
             )
 
         async def _resolve(
@@ -5359,6 +5380,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                fail_closed=getattr(self, "fail_closed", False),
             )
 
         async def _respond(
@@ -5465,6 +5487,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                fail_closed=getattr(self, "fail_closed", False),
             )
 
         def _build_provider_select(self):
@@ -5720,6 +5743,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: "discord.Interaction") -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                fail_closed=getattr(self, "fail_closed", False),
             )
 
         def _make_choice_callback(self, index: int, choice: str):
