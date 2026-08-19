@@ -87,6 +87,14 @@ def test_thread_creation_and_update_interception_require_principal_admin():
     assert "Only a Mason Admin can answer a pending update prompt" in update_source
 
 
+def test_principal_policy_disables_auto_threading_and_protects_model_cancel():
+    discord_module = load_plugin_adapter("discord")
+    message_source = inspect.getsource(discord_module.DiscordAdapter._handle_message)
+    cancel_source = inspect.getsource(discord_module.ModelPickerView._on_cancel)
+    assert "not self._principal_policy_active()" in message_source
+    assert "self._check_auth(interaction)" in cancel_source
+
+
 def test_principal_policy_requires_an_exact_admin_for_slash_commands(monkeypatch):
     """Crew may converse but cannot operate gateway slash commands."""
     runner = object.__new__(gateway_run.GatewayRunner)

@@ -3564,6 +3564,15 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
         )
 
+    def _principal_policy_active(self) -> bool:
+        """Fail closed for Discord side effects when principal policy is unreadable."""
+        try:
+            from hermes_cli.config import read_raw_config
+            from gateway.principal_toolsets import principal_policy_present
+            return principal_policy_present(read_raw_config(), "discord")
+        except Exception:
+            return True
+
     def _principal_control_authorized(self, source) -> bool:
         """Require an exact policy admin for Discord control surfaces."""
         try:
@@ -4677,7 +4686,10 @@ class DiscordAdapter(BasePlatformAdapter):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
-            auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
+            auto_thread = (
+                os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
+                and not self._principal_policy_active()
+            )
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
                 thread = await self._auto_create_thread(message)
@@ -5693,6 +5705,11 @@ def _define_discord_view_classes() -> None:
             )
 
         async def _on_cancel(self, interaction: discord.Interaction):
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized~", ephemeral=True
+                )
+                return
             self.resolved = True
             self.clear_items()
             await interaction.response.edit_message(
