@@ -596,8 +596,11 @@ class DiscordAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
-        self._allowed_user_ids: set = set()  # For button approval authorization
-        self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
+        self._allowed_user_ids: set = set()  # Normal conversation user filtering
+        self._allowed_role_ids: set = set()  # Normal conversation role filtering
+        # Conversation access and privileged confirmation buttons are separate.
+        self._approval_allowed_user_ids: set = set()
+        self._approval_allowed_role_ids: set = set()
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
@@ -698,6 +701,29 @@ class DiscordAdapter(BasePlatformAdapter):
                     int(rid.strip()) for rid in roles_env.split(",")
                     if rid.strip().isdigit()
                 }
+
+            # Sensitive approval controls must not inherit the normal
+            # conversation role allowlist. Operators can open conversation to
+            # an entire guild while reserving execution confirmation for an
+            # exact owner user.
+            approval_users_env = os.getenv("DISCORD_APPROVAL_ALLOWED_USERS", "")
+            self._approval_allowed_user_ids = (
+                {
+                    _clean_discord_id(uid) for uid in approval_users_env.split(",")
+                    if uid.strip()
+                }
+                if approval_users_env
+                else set(self._allowed_user_ids)
+            )
+            approval_roles_env = os.getenv("DISCORD_APPROVAL_ALLOWED_ROLES", "")
+            self._approval_allowed_role_ids = (
+                {
+                    int(rid.strip()) for rid in approval_roles_env.split(",")
+                    if rid.strip().isdigit()
+                }
+                if approval_roles_env
+                else set()
+            )
 
             # Set up intents.
             # Message Content is required for normal text replies.
@@ -4116,8 +4142,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
             view = ExecApprovalView(
                 session_key=session_key,
-                allowed_user_ids=self._allowed_user_ids,
-                allowed_role_ids=self._allowed_role_ids,
+                allowed_user_ids=self._approval_allowed_user_ids,
+                allowed_role_ids=self._approval_allowed_role_ids,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -4156,8 +4182,8 @@ class DiscordAdapter(BasePlatformAdapter):
             view = SlashConfirmView(
                 session_key=session_key,
                 confirm_id=confirm_id,
-                allowed_user_ids=self._allowed_user_ids,
-                allowed_role_ids=self._allowed_role_ids,
+                allowed_user_ids=self._approval_allowed_user_ids,
+                allowed_role_ids=self._approval_allowed_role_ids,
             )
 
             msg = await channel.send(embed=embed, view=view)

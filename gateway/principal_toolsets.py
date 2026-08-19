@@ -23,7 +23,7 @@ def _valid_platform_policy(policy: Any) -> bool:
     """
     if not isinstance(policy, dict):
         return False
-    allowed_keys = {"default", "users", "roles", "guilds"}
+    allowed_keys = {"default", "users", "roles", "guilds", "admin_users"}
     if any(not isinstance(key, str) or key not in allowed_keys for key in policy):
         return False
     if "default" in policy and _normalize_toolsets(policy["default"]) is None:
@@ -31,6 +31,10 @@ def _valid_platform_policy(policy: Any) -> bool:
     if "guilds" in policy:
         guilds = policy["guilds"]
         if not isinstance(guilds, list) or any(not isinstance(guild, str) for guild in guilds):
+            return False
+    if "admin_users" in policy:
+        admins = policy["admin_users"]
+        if not isinstance(admins, list) or any(not isinstance(user, str) for user in admins):
             return False
     for mapping_name in ("users", "roles"):
         if mapping_name not in policy:
@@ -90,6 +94,19 @@ def principal_guild_authorized(user_config: Any, platform_key: str, source: Any)
     guild_id = getattr(source, "guild_id", None)
     chat_type = str(getattr(source, "chat_type", "") or "").lower()
     return bool(guild_id) and chat_type not in {"dm", "direct", "private"} and str(guild_id) in guilds
+
+
+def principal_admin_authorized(user_config: Any, platform_key: str, source: Any) -> bool:
+    """Return whether an exact authenticated principal may run gateway controls."""
+    if not principal_guild_authorized(user_config, platform_key, source):
+        return False
+    policies = user_config.get("platform_principal_toolsets") if isinstance(user_config, dict) else None
+    platform_name = str(getattr(platform_key, "value", platform_key))
+    policy = policies.get(platform_name) if isinstance(policies, dict) else None
+    if not _valid_platform_policy(policy):
+        return False
+    admins = policy.get("admin_users", [])
+    return isinstance(admins, list) and str(getattr(source, "user_id", "")) in admins
 
 
 def resolve_principal_toolsets(

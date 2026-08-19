@@ -7228,14 +7228,19 @@ class GatewayRunner:
         # beyond the per-principal resolver.
         if source.platform == Platform.DISCORD:
             try:
-                from gateway.principal_toolsets import principal_guild_authorized
+                from gateway.principal_toolsets import (
+                    principal_guild_authorized,
+                    principal_policy_present,
+                )
 
-                if principal_guild_authorized(
-                    _load_gateway_config(),
-                    _platform_config_key(source.platform),
-                    source,
-                ):
-                    return True
+                principal_config = _load_gateway_config()
+                platform_key = _platform_config_key(source.platform)
+                if principal_policy_present(principal_config, platform_key):
+                    # A present principal policy owns Discord conversation
+                    # admission. Do not fall through to legacy user, pairing,
+                    # or allow-all gates, which could reopen DMs or another
+                    # guild for an otherwise privileged exact user.
+                    return principal_guild_authorized(principal_config, platform_key, source)
             except Exception:
                 return False
 
@@ -10400,6 +10405,21 @@ class GatewayRunner:
 
         if not canonical_cmd:
             return None
+        if source.platform == Platform.DISCORD:
+            try:
+                from gateway.principal_toolsets import (
+                    principal_admin_authorized,
+                    principal_policy_present,
+                )
+
+                principal_config = _load_gateway_config()
+                platform_key = _platform_config_key(source.platform)
+                if principal_policy_present(principal_config, platform_key):
+                    if principal_admin_authorized(principal_config, platform_key, source):
+                        return None
+                    return f"⛔ /{canonical_cmd} is admin-only here."
+            except Exception:
+                return f"⛔ /{canonical_cmd} is admin-only here."
         policy = _policy_for_source(self.config, source)
         if not policy.enabled or policy.can_run(source.user_id, canonical_cmd):
             return None
@@ -10579,7 +10599,7 @@ class GatewayRunner:
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
 
         connected_platforms = [p.value for p in self.adapters.keys()]
 
@@ -11677,7 +11697,7 @@ class GatewayRunner:
     async def _handle_retry_command(self, event: MessageEvent) -> str:
         """Handle /retry command - re-send the last user message."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
         history = self.session_store.load_transcript(session_entry.session_id)
         
         # Find the last user message
@@ -12039,7 +12059,7 @@ class GatewayRunner:
             if n < 1:
                 n = 1
 
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
         result = self.session_store.rewind_session(session_entry.session_id, n)
 
         if result is None:
@@ -13271,7 +13291,7 @@ class GatewayRunner:
         https://code.claude.com/docs/en/whats-new/2026-w20).
         """
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
         history = self.session_store.load_transcript(session_entry.session_id)
 
         if not history or len(history) < 4:
@@ -13941,7 +13961,7 @@ class GatewayRunner:
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
         session_id = session_entry.session_id
 
         if not self._session_db:
@@ -14087,7 +14107,7 @@ class GatewayRunner:
                 return t("gateway.resume.not_found", name=name)
 
         # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
+        current_entry = self._get_or_create_session_for_source(source)
         if current_entry.session_id == target_id:
             return t("gateway.resume.already_on", name=name)
 
@@ -14136,7 +14156,7 @@ class GatewayRunner:
         session_key = self._session_key_for_source(source)
 
         # Load the current session and its transcript
-        current_entry = self.session_store.get_or_create_session(source)
+        current_entry = self._get_or_create_session_for_source(source)
         history = self.session_store.load_transcript(current_entry.session_id)
         if not history:
             return t("gateway.branch.no_conversation")
