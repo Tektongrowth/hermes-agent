@@ -280,30 +280,96 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+class BrowserRouteUnavailableError(RuntimeError):
+    """A session-specific browser route matched but has no usable endpoint."""
+
+
+def _matching_session_cdp_route(browser_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the first CDP route matching the current gateway sender.
+
+    Routes are intentionally keyed by stable platform user IDs, not display
+    names or channel names.  Outside gateway-backed turns the session context
+    is empty, so CLI and cron callers retain the normal global browser route.
+    """
+    routes = browser_cfg.get("cdp_routes", [])
+    if not isinstance(routes, list) or not routes:
+        return None
+
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip()
+    except Exception:
+        return None
+
+    if not platform or not user_id:
+        return None
+
+    for route in routes:
+        if not isinstance(route, dict) or route.get("enabled", True) is False:
+            continue
+
+        route_platform = str(route.get("platform") or "").strip().lower()
+        if route_platform and route_platform != platform:
+            continue
+
+        raw_user_ids = route.get("user_ids", [])
+        if isinstance(raw_user_ids, (str, int)):
+            raw_user_ids = [raw_user_ids]
+        if not isinstance(raw_user_ids, (list, tuple, set)):
+            continue
+        user_ids = {str(value).strip() for value in raw_user_ids if str(value).strip()}
+        if user_id in user_ids:
+            return route
+
+    return None
+
+
 def _get_cdp_override() -> str:
     """Return a normalized CDP URL override, or empty string.
 
     Precedence is:
-    1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
-    2. ``browser.cdp_url`` in config.yaml (persistent config)
+    1. A matching ``browser.cdp_routes`` entry for the current gateway sender
+    2. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
+    3. ``browser.cdp_url`` in config.yaml (persistent global config)
 
-    When either is set, we skip both Browserbase and the local headless
-    launcher and connect directly to the supplied Chrome DevTools Protocol
-    endpoint.
+    Matching sender routes fail closed by default.  This prevents a teammate
+    whose local browser is offline or not yet enrolled from silently falling
+    back to another operator's global browser profile.
     """
-    env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
-    if env_override:
-        return _resolve_cdp_override(env_override)
-
+    browser_cfg: Dict[str, Any] = {}
     try:
         from hermes_cli.config import read_raw_config
 
         cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return _resolve_cdp_override(str(browser_cfg.get("cdp_url", "") or ""))
+        maybe_browser_cfg = cfg.get("browser", {}) if isinstance(cfg, dict) else {}
+        if isinstance(maybe_browser_cfg, dict):
+            browser_cfg = maybe_browser_cfg
     except Exception as e:
-        logger.debug("Could not read browser.cdp_url from config: %s", e)
+        logger.debug("Could not read browser routing config: %s", e)
+
+    route = _matching_session_cdp_route(browser_cfg)
+    if route is not None:
+        route_name = str(route.get("name") or "unnamed browser route").strip()
+        route_url = str(route.get("cdp_url") or "").strip()
+        if route_url:
+            logger.info("Using session browser route %s", route_name)
+            return _resolve_cdp_override(route_url)
+        if route.get("fail_closed", True) is not False:
+            raise BrowserRouteUnavailableError(
+                f"Browser route '{route_name}' is required for this requester but "
+                "its local browser connector is not configured or online. "
+                "No global browser fallback was used."
+            )
+
+    env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
+    if env_override:
+        return _resolve_cdp_override(env_override)
+
+    global_url = str(browser_cfg.get("cdp_url", "") or "").strip()
+    if global_url:
+        return _resolve_cdp_override(global_url)
 
     return ""
 

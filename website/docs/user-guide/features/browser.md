@@ -344,6 +344,27 @@ Then launch the Hermes CLI and run `/browser connect`.
 
 When connected via CDP, all browser tools (`browser_navigate`, `browser_click`, etc.) operate on your live browser instance instead of spinning up a cloud session.
 
+#### Route gateway users to separate CDP browsers
+
+A shared gateway can route browser calls to different CDP endpoints by stable platform user ID. Configure `browser.cdp_routes` as an ordered list:
+
+```yaml
+browser:
+  cdp_url: http://127.0.0.1:9230  # global/default browser
+  cdp_routes:
+    - name: rico-windows
+      platform: discord
+      user_ids:
+        - "1378208835302592534"
+      cdp_url: http://127.0.0.1:9241
+```
+
+A matching route takes precedence over both `BROWSER_CDP_URL` and the global `browser.cdp_url`. Match on immutable platform user IDs, not display names.
+
+Matching routes fail closed by default. If the route has no `cdp_url`, Hermes returns an error instead of opening the global browser. Set `fail_closed: false` only when cross-user fallback is intentionally safe.
+
+Keep remote CDP private. Bind Chrome remote debugging to loopback on the user's computer, use a dedicated `--user-data-dir`, and carry CDP through a private VPN or authenticated SSH tunnel. Do not expose a Chrome debugging port directly to the public internet.
+
 ### WSL2 + Windows Chrome: prefer MCP over `/browser connect`
 
 If Hermes runs inside WSL2 but the Chrome window you want to control runs on the Windows host, `/browser connect` is often not the best path.
