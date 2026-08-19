@@ -105,6 +105,21 @@ def _clean_discord_id(entry: str) -> str:
     return entry.strip()
 
 
+def _principal_role_ids(member: Any) -> Tuple[str, ...]:
+    """Extract stable role IDs from a Discord-authenticated member object."""
+    roles = getattr(member, "roles", ()) or ()
+    if isinstance(roles, (str, bytes)):
+        return ()
+    try:
+        return tuple(sorted({
+            str(role.id)
+            for role in roles
+            if getattr(role, "id", None) is not None
+        }))
+    except TypeError:
+        return ()
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available.
 
@@ -3495,6 +3510,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            principal_role_ids=_principal_role_ids(interaction.user),
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
@@ -3577,6 +3593,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            principal_role_ids=_principal_role_ids(interaction.user),
         )
 
         _parent_channel = self._thread_parent_channel(getattr(interaction, "channel", None))
@@ -4674,6 +4691,7 @@ class DiscordAdapter(BasePlatformAdapter):
             guild_id=str(guild.id) if guild else None,
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
+            principal_role_ids=_principal_role_ids(message.author),
         )
 
         # Build media URLs -- download image attachments to local cache so the
@@ -4889,13 +4907,27 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        """Session-scoped key for text message batching."""
+        """Principal-scoped key for text message batching.
+
+        Discord threads may intentionally share one conversation session, but
+        client-side message chunks may only be recombined for the authenticated
+        user who sent them.
+        """
         from gateway.session import build_session_key
-        return build_session_key(
+        session_key = build_session_key(
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+        principal_id = json.dumps(event.source.user_id, ensure_ascii=True)
+        role_ids = event.source.principal_role_ids or ()
+        if isinstance(role_ids, (str, bytes)):
+            role_ids = (role_ids,)
+        principal_roles = sorted(
+            {str(role_id) for role_id in role_ids if role_id is not None}
+        )
+        roles_key = json.dumps(principal_roles, ensure_ascii=True, separators=(",", ":"))
+        return f"{session_key}:principal:{principal_id}:roles:{roles_key}"
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:
         """Buffer a text event and reset the flush timer.

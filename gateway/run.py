@@ -1496,6 +1496,23 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+def _resolve_enabled_toolsets(user_config: Any, source: "SessionSource") -> list[str]:
+    """Resolve platform defaults and any principal-scoped toolset policy."""
+    from gateway.principal_toolsets import resolve_principal_toolsets
+    from hermes_cli import tools_config
+
+    platform_key = _platform_config_key(source.platform)
+    fallback_toolsets = sorted(
+        tools_config._get_platform_tools(user_config, platform_key)
+    )
+    return resolve_principal_toolsets(
+        user_config,
+        platform_key,
+        source,
+        fallback_toolsets,
+    )
+
+
 def _teams_pipeline_plugin_enabled() -> bool:
     """Return True when the standalone Teams pipeline plugin is enabled."""
     config = _load_gateway_config()
@@ -2362,7 +2379,28 @@ class GatewayRunner:
         return self._exit_code
 
     def _session_key_for_source(self, source: SessionSource) -> str:
-        """Resolve the current session key for a source, honoring gateway config when available."""
+        """Resolve a session key without sharing principal-policy transcripts.
+
+        Principal-scoped tool restrictions do not prevent a later user from
+        asking the model to repeat prior owner-only history. When an explicit
+        platform principal policy exists, every non-DM participant, including
+        a thread participant, gets an isolated transcript/session key.
+        """
+        try:
+            from gateway.principal_toolsets import principal_policy_present
+
+            user_config = _load_gateway_config()
+            if principal_policy_present(user_config, _platform_config_key(source.platform)):
+                return build_session_key(
+                    source,
+                    group_sessions_per_user=True,
+                    thread_sessions_per_user=True,
+                )
+        except Exception:
+            # A policy-resolution failure must not manufacture a shared key.
+            # Fall through only when normal configuration/session resolution is
+            # still available; the policy parser itself fails closed for tools.
+            pass
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
                 session_key = self.session_store._generate_session_key(source)
@@ -2376,6 +2414,34 @@ class GatewayRunner:
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
+
+    def _get_or_create_session_for_source(
+        self,
+        source: SessionSource,
+        *,
+        force_new: bool = False,
+    ):
+        """Create/read the entry under the same key used by live routing."""
+        try:
+            from gateway.principal_toolsets import principal_policy_present
+
+            user_config = _load_gateway_config()
+            policy_present = principal_policy_present(
+                user_config,
+                _platform_config_key(source.platform),
+            )
+        except Exception:
+            policy_present = False
+
+        if policy_present:
+            return self.session_store.get_or_create_session(
+                source,
+                force_new=force_new,
+                session_key=self._session_key_for_source(source),
+            )
+        if force_new:
+            return self.session_store.get_or_create_session(source, force_new=True)
+        return self.session_store.get_or_create_session(source)
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
@@ -3331,11 +3397,69 @@ class GatewayRunner:
         except Exception:
             return False
 
-    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
+    def _queue_or_replace_pending_event(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        *,
+        merge_text: bool = False,
+    ) -> None:
+        """Queue a follow-up without crossing authenticated-principal boundaries.
+
+        The adapter slot holds the next turn.  Same-principal messages may be
+        coalesced there, but a different user or a role-change snapshot must
+        retain both complete turns.  Put that later turn on the existing FIFO
+        overflow instead of overwriting the slot or merging its context.
+        """
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
+        merged = merge_pending_message_event(
+            adapter._pending_messages,
+            session_key,
+            event,
+            merge_text=merge_text,
+        )
+        if not merged:
+            self._enqueue_fifo(session_key, event, adapter)
+
+    @staticmethod
+    def _running_agent_accepts_source_toolsets(
+        running_agent: Any,
+        source: "SessionSource",
+    ) -> bool:
+        """Authorize mid-run injection against the running agent's grants.
+
+        Concrete toolset lists are normalized and compared. Policy-resolution
+        errors fail closed, allowing callers to queue at a turn boundary.
+        """
+        running_toolsets = getattr(running_agent, "enabled_toolsets", None)
+        if not isinstance(running_toolsets, (list, tuple, set)) or not all(
+            isinstance(toolset, str) for toolset in running_toolsets
+        ):
+            # Legacy agents/test doubles may not expose this AIAgent field.
+            # Preserve pre-RBAC behavior only when no principal policy is
+            # configured; under an explicit policy, unknown grants fail closed.
+            try:
+                from gateway.principal_toolsets import principal_policy_present
+
+                user_config = _load_gateway_config()
+                platform_key = _platform_config_key(source.platform)
+                return not principal_policy_present(user_config, platform_key)
+            except Exception:
+                return False
+
+        try:
+            user_config = _load_gateway_config()
+            incoming_toolsets = _resolve_enabled_toolsets(user_config, source)
+        except Exception:
+            return False
+        if not isinstance(incoming_toolsets, (list, tuple, set)) or not all(
+            isinstance(toolset, str) for toolset in incoming_toolsets
+        ):
+            return False
+
+        return sorted(set(incoming_toolsets)) == sorted(set(running_toolsets))
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
@@ -3390,11 +3514,20 @@ class GatewayRunner:
         running_agent = self._running_agents.get(session_key)
 
         effective_mode = self._busy_input_mode
+        forced_policy_queue = False
+        if running_agent is not None and running_agent is not _AGENT_PENDING_SENTINEL:
+            forced_policy_queue = not self._running_agent_accepts_source_toolsets(
+                running_agent, event.source
+            )
+            if forced_policy_queue:
+                effective_mode = "queue"
+
         busy_text_mode = getattr(self, "_busy_text_mode", "queue")
         if (
             event.message_type == MessageType.TEXT
             and busy_text_mode == "queue"
             and effective_mode != "steer"
+            and not forced_policy_queue
         ):
             return False
 
@@ -3445,8 +3578,7 @@ class GatewayRunner:
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
         if not steered:
-            merge_pending_message_event(
-                adapter._pending_messages,
+            self._queue_or_replace_pending_event(
                 session_key,
                 event,
                 merge_text=event.message_type == MessageType.TEXT,
@@ -7069,6 +7201,23 @@ class GatewayRunner:
         if not user_id:
             return False
 
+        # An explicit Discord principal policy can safely open normal mention
+        # conversations only inside its named guilds. This does not open DMs,
+        # other guilds, channels outside the adapter allowlist, or any tools
+        # beyond the per-principal resolver.
+        if source.platform == Platform.DISCORD:
+            try:
+                from gateway.principal_toolsets import principal_guild_authorized
+
+                if principal_guild_authorized(
+                    _load_gateway_config(),
+                    _platform_config_key(source.platform),
+                    source,
+                ):
+                    return True
+            except Exception:
+                return False
+
         platform_env_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOWED_USERS",
             Platform.DISCORD: "DISCORD_ALLOWED_USERS",
@@ -7792,8 +7941,19 @@ class GatewayRunner:
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent is _AGENT_PENDING_SENTINEL:
                     # Agent hasn't started yet — queue as turn-boundary fallback.
-                    adapter = self.adapters.get(source.platform)
-                    if adapter:
+                    queued_event = MessageEvent(
+                        text=steer_text,
+                        message_type=MessageType.TEXT,
+                        source=event.source,
+                        message_id=event.message_id,
+                        channel_prompt=event.channel_prompt,
+                    )
+                    self._queue_or_replace_pending_event(_quick_key, queued_event)
+                    return "Agent still starting — /steer queued for the next turn."
+                if running_agent and hasattr(running_agent, "steer"):
+                    if not self._running_agent_accepts_source_toolsets(
+                        running_agent, event.source
+                    ):
                         queued_event = MessageEvent(
                             text=steer_text,
                             message_type=MessageType.TEXT,
@@ -7801,9 +7961,11 @@ class GatewayRunner:
                             message_id=event.message_id,
                             channel_prompt=event.channel_prompt,
                         )
-                        adapter._pending_messages[_quick_key] = queued_event
-                    return "Agent still starting — /steer queued for the next turn."
-                if running_agent and hasattr(running_agent, "steer"):
+                        self._queue_or_replace_pending_event(_quick_key, queued_event)
+                        return (
+                            "Toolset policy differs from the active run — "
+                            "/steer queued for the next turn."
+                        )
                     try:
                         accepted = running_agent.steer(steer_text)
                     except Exception as exc:
@@ -7814,16 +7976,14 @@ class GatewayRunner:
                         return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
                     return "Steer rejected (empty payload)."
                 # Running agent is missing or lacks steer() — fall back to queue.
-                adapter = self.adapters.get(source.platform)
-                if adapter:
-                    queued_event = MessageEvent(
-                        text=steer_text,
-                        message_type=MessageType.TEXT,
-                        source=event.source,
-                        message_id=event.message_id,
-                        channel_prompt=event.channel_prompt,
-                    )
-                    adapter._pending_messages[_quick_key] = queued_event
+                queued_event = MessageEvent(
+                    text=steer_text,
+                    message_type=MessageType.TEXT,
+                    source=event.source,
+                    message_id=event.message_id,
+                    channel_prompt=event.channel_prompt,
+                )
+                self._queue_or_replace_pending_event(_quick_key, queued_event)
                 return "No active agent — /steer queued for the next turn."
 
             # /model must not be used while the agent is running.
@@ -7926,9 +8086,7 @@ class GatewayRunner:
 
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
-                adapter = self.adapters.get(source.platform)
-                if adapter:
-                    merge_pending_message_event(adapter._pending_messages, _quick_key, event)
+                self._queue_or_replace_pending_event(_quick_key, event)
                 return None
 
             _telegram_followup_grace = float(
@@ -7947,14 +8105,11 @@ class GatewayRunner:
                     time.time() - _started_at,
                     _quick_key,
                 )
-                adapter = self.adapters.get(source.platform)
-                if adapter:
-                    merge_pending_message_event(
-                        adapter._pending_messages,
-                        _quick_key,
-                        event,
-                        merge_text=True,
-                    )
+                self._queue_or_replace_pending_event(
+                    _quick_key,
+                    event,
+                    merge_text=True,
+                )
                 return None
 
             running_agent = self._running_agents.get(_quick_key)
@@ -7966,15 +8121,12 @@ class GatewayRunner:
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 # Queue the message so it will be picked up after the
-                # agent starts.
-                adapter = self.adapters.get(source.platform)
-                if adapter:
-                    merge_pending_message_event(
-                        adapter._pending_messages,
-                        _quick_key,
-                        event,
-                        merge_text=True,
-                    )
+                # agent starts. Preserve any earlier principal's full turn.
+                self._queue_or_replace_pending_event(
+                    _quick_key,
+                    event,
+                    merge_text=True,
+                )
                 return None
             if self._draining:
                 if self._queue_during_drain_enabled():
@@ -7994,7 +8146,10 @@ class GatewayRunner:
                 # is empty, the agent lacks steer(), or steer() rejects.
                 steer_text = (event.text or "").strip()
                 steered = False
-                if steer_text and hasattr(running_agent, "steer"):
+                toolsets_compatible = self._running_agent_accepts_source_toolsets(
+                    running_agent, event.source
+                )
+                if steer_text and toolsets_compatible and hasattr(running_agent, "steer"):
                     try:
                         steered = bool(running_agent.steer(steer_text))
                     except Exception as exc:
@@ -8511,7 +8666,7 @@ class GatewayRunner:
                 # on error. Let the user drive the next turn.
                 if _final_text.strip():
                     try:
-                        session_entry = self.session_store.get_or_create_session(source)
+                        session_entry = self._get_or_create_session_for_source(source)
                     except Exception:
                         session_entry = None
                     if session_entry is not None:
@@ -8785,7 +8940,10 @@ class GatewayRunner:
             cached_sources = OrderedDict()
             self._session_sources = cached_sources
         try:
-            cached_sources[session_key] = dataclasses.replace(source)
+            # SessionSource serialization intentionally excludes ephemeral
+            # authenticated role grants. Round-trip before caching so this
+            # longer-lived routing cache cannot retain stale authorization.
+            cached_sources[session_key] = SessionSource.from_dict(source.to_dict())
         except Exception:
             logger.debug("Failed to cache live session source for %s", session_key, exc_info=True)
             return
@@ -8839,7 +8997,7 @@ class GatewayRunner:
             except Exception:
                 pass
 
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self._get_or_create_session_for_source(source)
         session_key = session_entry.session_key
         self._cache_session_source(session_key, source)
         if self._is_telegram_topic_lane(source):
@@ -12583,8 +12741,7 @@ class GatewayRunner:
 
             platform_key = _platform_config_key(source.platform)
 
-            from hermes_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            enabled_toolsets = _resolve_enabled_toolsets(user_config, source)
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -15806,7 +15963,7 @@ class GatewayRunner:
                 self.session_store._ensure_loaded()
                 entry = self.session_store._entries.get(session_key)
                 if entry and getattr(entry, "origin", None):
-                    return entry.origin
+                    return SessionSource.from_dict(entry.origin.to_dict())
             except Exception as exc:
                 logger.debug(
                     "Synthetic process-event session-store lookup failed for %s: %s",
@@ -15816,7 +15973,7 @@ class GatewayRunner:
 
             cached_source = self._get_cached_session_source(session_key)
             if cached_source is not None:
-                return cached_source
+                return SessionSource.from_dict(cached_source.to_dict())
 
             _parsed = _parse_session_key(session_key)
             if _parsed:
@@ -16930,8 +17087,16 @@ class GatewayRunner:
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        user_config = _load_gateway_config()
+        platform_key = _platform_config_key(source.platform)
+        from gateway.principal_toolsets import principal_policy_present
+        has_principal_policy = principal_policy_present(user_config, platform_key)
+
         # ---- Proxy mode: delegate to remote API server ----
-        if self._get_proxy_url():
+        # Principal-scoped policies are enforced in this process; an older or
+        # differently configured proxy must not widen the authenticated user's
+        # tool access.
+        if self._get_proxy_url() and not has_principal_policy:
             return await self._run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
@@ -16950,12 +17115,8 @@ class GatewayRunner:
             if run_generation is None or not session_key:
                 return True
             return self._is_session_run_current(session_key, run_generation)
-        
-        user_config = _load_gateway_config()
-        platform_key = _platform_config_key(source.platform)
 
-        from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        enabled_toolsets = _resolve_enabled_toolsets(user_config, source)
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -18919,7 +19080,7 @@ class GatewayRunner:
                     )
                     adapter = self.adapters.get(source.platform)
                     if adapter and pending_event:
-                        merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+                        self._queue_or_replace_pending_event(session_key, pending_event)
                     elif adapter and hasattr(adapter, 'queue_message'):
                         adapter.queue_message(session_key, pending)
                     return result_holder[0] or {"final_response": response, "messages": history}

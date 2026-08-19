@@ -1593,14 +1593,35 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
+def message_events_share_principal(existing: MessageEvent, incoming: MessageEvent) -> bool:
+    """Return whether two events carry the same authenticated principal context."""
+    existing_source = getattr(existing, "source", None)
+    incoming_source = getattr(incoming, "source", None)
+    if existing_source is None or incoming_source is None:
+        return False
+    return (
+        getattr(existing_source, "platform", None)
+        == getattr(incoming_source, "platform", None)
+        and getattr(existing_source, "user_id", None)
+        == getattr(incoming_source, "user_id", None)
+        and getattr(existing_source, "principal_role_ids", ())
+        == getattr(incoming_source, "principal_role_ids", ())
+    )
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
     event: MessageEvent,
     *,
     merge_text: bool = False,
-) -> None:
+) -> bool:
     """Store or merge a pending event for a session.
+
+    Returns ``False`` when a pending event already belongs to a different
+    authenticated principal. The existing event is preserved so another user
+    cannot erase or starve the queued turn. Callers with FIFO support may enqueue
+    the incoming event separately.
 
     Photo bursts/albums often arrive as multiple near-simultaneous PHOTO
     events. Merge those into the existing queued event so the next turn sees
@@ -1613,6 +1634,12 @@ def merge_pending_message_event(
     """
     existing = pending_messages.get(session_key)
     if existing:
+        # A session key can be shared by multiple authenticated users (and a
+        # user's role grants can change between events). Never combine their
+        # text or media into one queued turn.
+        if not message_events_share_principal(existing, event):
+            return False
+
         existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
         incoming_is_photo = event.message_type == MessageType.PHOTO
         existing_has_media = bool(existing.media_urls)
@@ -1623,7 +1650,7 @@ def merge_pending_message_event(
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
-            return
+            return True
 
         if existing_has_media or incoming_has_media:
             if incoming_has_media:
@@ -1641,7 +1668,7 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
-            return
+            return True
 
         if (
             merge_text
@@ -1650,9 +1677,10 @@ def merge_pending_message_event(
         ):
             if event.text:
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
-            return
+            return True
 
     pending_messages[session_key] = event
+    return True
 
 
 # Error substrings that indicate a transient *connection* failure worth retrying.
@@ -4625,6 +4653,7 @@ class BasePlatformAdapter(ABC):
         guild_id: Optional[str] = None,
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        principal_role_ids: Optional[Tuple[str, ...]] = None,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
         # Normalize empty topic to None
@@ -4645,6 +4674,11 @@ class BasePlatformAdapter(ABC):
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
+            principal_role_ids=tuple(sorted({
+                str(role_id)
+                for role_id in (principal_role_ids or ())
+                if role_id is not None
+            })),
         )
     
     @abstractmethod

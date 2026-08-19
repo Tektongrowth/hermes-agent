@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,8 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    # Authenticated, per-event authorization context. Deliberately not persisted.
+    principal_role_ids: Tuple[str, ...] = ()
     
     @property
     def description(self) -> str:
@@ -856,7 +858,8 @@ class SessionStore:
     def get_or_create_session(
         self,
         source: SessionSource,
-        force_new: bool = False
+        force_new: bool = False,
+        session_key: Optional[str] = None,
     ) -> SessionEntry:
         """
         Get an existing session or create a new one.
@@ -864,7 +867,7 @@ class SessionStore:
         Evaluates reset policy to determine if the existing session is stale.
         Creates a session record in SQLite when a new session starts.
         """
-        session_key = self._generate_session_key(source)
+        session_key = session_key or self._generate_session_key(source)
         now = _now()
 
         # SQLite calls are made outside the lock to avoid holding it during I/O.
@@ -922,7 +925,10 @@ class SessionStore:
                 session_id=session_id,
                 created_at=now,
                 updated_at=now,
-                origin=source,
+                # Session origins are persisted and reused by synthetic turns.
+                # Round-trip through the persistence representation so
+                # per-event authorization context cannot enter session state.
+                origin=SessionSource.from_dict(source.to_dict()),
                 display_name=source.chat_name,
                 platform=source.platform,
                 chat_type=source.chat_type,
