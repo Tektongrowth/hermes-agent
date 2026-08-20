@@ -87,7 +87,21 @@ def browser_dialog(
 ) -> str:
     """Respond to a pending dialog on the active task's CDP supervisor."""
     effective_task_id = task_id or "default"
-    supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+    from tools.browser_tool import (  # lazy to avoid browser tool import cycles
+        BrowserRouteUnavailableError,
+        _get_cdp_override,
+        _route_error_result,
+        _route_scoped_task_key,
+    )
+
+    try:
+        scoped_task_id = _route_scoped_task_key(effective_task_id)
+        expected_cdp_url = _get_cdp_override() or None
+    except BrowserRouteUnavailableError:
+        return json.dumps(_route_error_result())
+    supervisor = SUPERVISOR_REGISTRY.get(
+        scoped_task_id, expected_cdp_url=expected_cdp_url
+    )
     if supervisor is None:
         return json.dumps(
             {

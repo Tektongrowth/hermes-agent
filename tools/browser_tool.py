@@ -52,6 +52,7 @@ Usage:
 import atexit
 import functools
 import json
+import hashlib
 import logging
 import os
 import re
@@ -65,6 +66,7 @@ import time
 import requests
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
@@ -231,7 +233,7 @@ def _get_extraction_model() -> Optional[str]:
     return os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip() or None
 
 
-def _resolve_cdp_override(cdp_url: str) -> str:
+def _resolve_cdp_override(cdp_url: str, *, strict: bool = False) -> str:
     """Normalize a user-supplied CDP endpoint into a concrete connectable URL.
 
     Accepts:
@@ -245,10 +247,14 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     """
     raw = (cdp_url or "").strip()
     if not raw:
+        if strict:
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
         return ""
 
     lowered = raw.lower()
     if "/devtools/browser/" in lowered:
+        if strict and not lowered.startswith(("ws://", "wss://")):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
         return raw
 
     discovery_url = raw
@@ -268,13 +274,52 @@ def _resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
+        if strict:
+            logger.warning("Assigned browser CDP discovery failed: %s", type(exc).__name__)
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE) from None
         logger.warning("Failed to resolve CDP endpoint %s via %s: %s", raw, version_url, exc)
         return raw
 
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
-    if ws_url:
-        logger.info("Resolved CDP endpoint %s -> %s", raw, ws_url)
+    if ws_url and (not strict or ws_url.lower().startswith(("ws://", "wss://"))):
+        if strict:
+            try:
+                endpoint_parts = urlsplit(discovery_url)
+                advertised_parts = urlsplit(ws_url)
+                endpoint_port = endpoint_parts.port
+                advertised_port = advertised_parts.port
+            except ValueError:
+                raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE) from None
+            if (
+                endpoint_parts.scheme not in {"http", "https"}
+                or not endpoint_parts.hostname
+                or endpoint_parts.username is not None
+                or endpoint_parts.password is not None
+                or advertised_parts.scheme not in {"ws", "wss"}
+                or not advertised_parts.hostname
+                or advertised_parts.username is not None
+                or advertised_parts.password is not None
+                or not advertised_parts.path.startswith("/")
+                or endpoint_port is not None and not 1 <= endpoint_port <= 65535
+                or advertised_port is not None and not 1 <= advertised_port <= 65535
+            ):
+                raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+            ws_url = urlunsplit(
+                (
+                    "wss" if endpoint_parts.scheme == "https" else "ws",
+                    endpoint_parts.netloc,
+                    advertised_parts.path,
+                    advertised_parts.query,
+                    "",
+                )
+            )
+            logger.info("Resolved assigned gateway browser CDP endpoint")
+        else:
+            logger.info("Resolved CDP endpoint %s -> %s", raw, ws_url)
         return ws_url
+
+    if strict:
+        raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
 
     logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", version_url)
     return raw
@@ -284,51 +329,208 @@ class BrowserRouteUnavailableError(RuntimeError):
     """A session-specific browser route matched but has no usable endpoint."""
 
 
+_ROUTE_ERROR_MESSAGE = "The browser assigned to this gateway user is unavailable."
+
+
+def _route_error_result() -> Dict[str, Any]:
+    """Return the stable, endpoint-free error exposed by browser tools."""
+    return {
+        "success": False,
+        "error": "browser_route_unavailable",
+        "message": _ROUTE_ERROR_MESSAGE,
+    }
+
+
+def _current_gateway_identity() -> Optional[Tuple[str, str]]:
+    """Return the normalized immutable gateway identity, when complete."""
+    try:
+        from gateway.session_context import get_session_env, has_gateway_context
+
+        if not has_gateway_context():
+            return None
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+        user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+    except Exception:
+        return None
+    if not platform or not user_id:
+        return None
+    return platform, user_id
+
+
 def _matching_session_cdp_route(browser_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return the first CDP route matching the current gateway sender.
+    """Resolve the named CDP route matching the current gateway sender.
 
     Routes are intentionally keyed by stable platform user IDs, not display
     names or channel names.  Outside gateway-backed turns the session context
     is empty, so CLI and cron callers retain the normal global browser route.
+
+    The supported schema is ``cdp_routes.<platform>.<user-id>: <endpoint>``.
+    A route that names the current identity is mandatory and fail closed.  The
+    short-lived list prototype is recognized only so a matching old entry also
+    fails closed instead of silently opening the global browser.
     """
-    routes = browser_cfg.get("cdp_routes", [])
+    identity = _current_gateway_identity()
+    if identity is None:
+        return None
+    platform, user_id = identity
+
+    routes = browser_cfg.get("cdp_routes", {})
     if isinstance(routes, str):
+        if not routes.strip():
+            return None
         try:
             routes = json.loads(routes)
         except (TypeError, ValueError):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE) from None
+
+    if routes in (None, {}, []):
+        return None
+
+    if isinstance(routes, dict):
+        platform_matches = [
+            value
+            for configured_platform, value in routes.items()
+            if str(configured_platform).strip().lower() == platform
+        ]
+        if not platform_matches:
             return None
-    if not isinstance(routes, list) or not routes:
+        if len(platform_matches) != 1:
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        platform_routes = platform_matches[0]
+        if not isinstance(platform_routes, dict):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        user_matches = [
+            endpoint_name
+            for configured_user_id, endpoint_name in platform_routes.items()
+            if str(configured_user_id).strip() == user_id
+        ]
+        if not user_matches:
+            return None
+        if len(user_matches) != 1:
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        return {
+            "platform": platform,
+            "user_id": user_id,
+            "endpoint_name": user_matches[0],
+        }
+
+    # Fail closed for a matching entry from the removed list-based prototype.
+    if isinstance(routes, list):
+        for route in routes:
+            if not isinstance(route, dict):
+                continue
+            route_platform = str(route.get("platform") or "").strip().lower()
+            raw_user_ids = route.get("user_ids", [])
+            if isinstance(raw_user_ids, (str, int)):
+                raw_user_ids = [raw_user_ids]
+            if not isinstance(raw_user_ids, (list, tuple, set)):
+                continue
+            user_ids = {str(value).strip() for value in raw_user_ids}
+            if route_platform == platform and user_id in user_ids:
+                raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
         return None
 
+    raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+
+
+def _read_browser_config() -> Dict[str, Any]:
+    """Read the browser config without caching route or identity state."""
     try:
-        from gateway.session_context import get_session_env
+        from hermes_cli.config import read_raw_config
 
-        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
-        user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip()
-    except Exception:
-        return None
+        cfg = read_raw_config()
+        if not isinstance(cfg, dict):
+            if _current_gateway_identity() is not None:
+                raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+            return {}
+        browser_cfg = cfg.get("browser", {})
+        if browser_cfg in (None, {}):
+            return {}
+        if not isinstance(browser_cfg, dict):
+            if _current_gateway_identity() is not None:
+                raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+            return {}
+        return browser_cfg
+    except BrowserRouteUnavailableError:
+        raise
+    except Exception as exc:
+        logger.debug("Could not read browser routing config: %s", type(exc).__name__)
+        if _current_gateway_identity() is not None:
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE) from None
+        return {}
 
-    if not platform or not user_id:
-        return None
 
-    for route in routes:
-        if not isinstance(route, dict) or route.get("enabled", True) is False:
-            continue
+def _mapped_route_required() -> bool:
+    """Return whether the current gateway identity has a mandatory route."""
+    return _matching_session_cdp_route(_read_browser_config()) is not None
 
-        route_platform = str(route.get("platform") or "").strip().lower()
-        if route_platform and route_platform != platform:
-            continue
 
-        raw_user_ids = route.get("user_ids", [])
-        if isinstance(raw_user_ids, (str, int)):
-            raw_user_ids = [raw_user_ids]
-        if not isinstance(raw_user_ids, (list, tuple, set)):
-            continue
-        user_ids = {str(value).strip() for value in raw_user_ids if str(value).strip()}
-        if user_id in user_ids:
-            return route
+def _camofox_allowed() -> bool:
+    """Return whether Camofox may serve the current gateway identity."""
+    return _is_camofox_mode() and not _mapped_route_required()
 
-    return None
+
+def _route_error_guard(func):
+    """Convert routing failures from any browser wrapper to stable tool JSON."""
+    @functools.wraps(func)
+    def guarded(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except BrowserRouteUnavailableError:
+            return json.dumps(_route_error_result())
+
+    return guarded
+
+
+def _redact_mapped_endpoint_text(value: Any, endpoint: str = "") -> str:
+    """Remove endpoint URLs/tokens from mapped-route diagnostics."""
+    text = str(value or "")
+    if endpoint:
+        text = text.replace(endpoint, "[assigned browser endpoint]")
+    return re.sub(r"(?:https?|wss?)://[^\s\"'<>]+", "[assigned browser endpoint]", text)
+
+
+def _redact_mapped_command_result(result: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+    """Sanitize model-visible failures from an assigned browser command."""
+    if result.get("success"):
+        return result
+    sanitized = dict(result)
+    if "error" in sanitized:
+        sanitized["error"] = _redact_mapped_endpoint_text(sanitized["error"], endpoint)
+    if "message" in sanitized:
+        sanitized["message"] = _redact_mapped_endpoint_text(sanitized["message"], endpoint)
+    return sanitized
+
+
+def _resolve_cdp_route_state() -> Tuple[str, bool]:
+    """Resolve the CDP endpoint and mapped-route flag from one config snapshot."""
+    browser_cfg = _read_browser_config()
+    route = _matching_session_cdp_route(browser_cfg)
+    if route is not None:
+        endpoint_name = route.get("endpoint_name")
+        endpoints = browser_cfg.get("cdp_endpoints", {})
+        if not isinstance(endpoint_name, (str, int)) or not str(endpoint_name).strip():
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        if not isinstance(endpoints, dict):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        endpoint = endpoints.get(str(endpoint_name).strip())
+        if not isinstance(endpoint, dict):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        route_url = os.path.expandvars(str(endpoint.get("url") or "").strip()).strip()
+        if not route_url or re.search(r"\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z0-9_]*)", route_url):
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE)
+        logger.info("Using assigned gateway browser route")
+        return _resolve_cdp_override(route_url, strict=True), True
+
+    env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
+    if env_override:
+        return _resolve_cdp_override(env_override), False
+
+    global_url = str(browser_cfg.get("cdp_url", "") or "").strip()
+    if global_url:
+        return _resolve_cdp_override(global_url), False
+
+    return "", False
 
 
 def _get_cdp_override() -> str:
@@ -343,40 +545,8 @@ def _get_cdp_override() -> str:
     whose local browser is offline or not yet enrolled from silently falling
     back to another operator's global browser profile.
     """
-    browser_cfg: Dict[str, Any] = {}
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        maybe_browser_cfg = cfg.get("browser", {}) if isinstance(cfg, dict) else {}
-        if isinstance(maybe_browser_cfg, dict):
-            browser_cfg = maybe_browser_cfg
-    except Exception as e:
-        logger.debug("Could not read browser routing config: %s", e)
-
-    route = _matching_session_cdp_route(browser_cfg)
-    if route is not None:
-        route_name = str(route.get("name") or "unnamed browser route").strip()
-        route_url = str(route.get("cdp_url") or "").strip()
-        if route_url:
-            logger.info("Using session browser route %s", route_name)
-            return _resolve_cdp_override(route_url)
-        if route.get("fail_closed", True) is not False:
-            raise BrowserRouteUnavailableError(
-                f"Browser route '{route_name}' is required for this requester but "
-                "its local browser connector is not configured or online. "
-                "No global browser fallback was used."
-            )
-
-    env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
-    if env_override:
-        return _resolve_cdp_override(env_override)
-
-    global_url = str(browser_cfg.get("cdp_url", "") or "").strip()
-    if global_url:
-        return _resolve_cdp_override(global_url)
-
-    return ""
+    endpoint, _mapped = _resolve_cdp_route_state()
+    return endpoint
 
 
 def _get_dialog_policy_config() -> Tuple[str, float]:
@@ -415,7 +585,12 @@ def _get_dialog_policy_config() -> Tuple[str, float]:
         return DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S
 
 
-def _ensure_cdp_supervisor(task_id: str) -> None:
+def _ensure_cdp_supervisor(
+    task_id: str,
+    *,
+    required: bool = False,
+    expected_cdp_url: Optional[str] = None,
+) -> None:
     """Start a CDP supervisor for ``task_id`` if an endpoint is reachable.
 
     Idempotent — delegates to ``SupervisorRegistry.get_or_start`` which skips
@@ -430,11 +605,11 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
       2. ``_active_sessions[task_id]["cdp_url"]`` — covers Browserbase + any
          other cloud provider whose ``create_session`` returns a raw CDP URL.
 
-    Swallows all errors — failing to attach the supervisor must not break
-    the browser session itself.  The agent simply won't see
-    ``pending_dialogs`` / ``frame_tree`` fields in snapshots.
+    Legacy/global and cloud sessions keep the historical best-effort behavior.
+    For a mapped per-user route, ``required=True`` makes attachment an active
+    health check: failure raises a safe route error and never falls back.
     """
-    cdp_url = _get_cdp_override()
+    cdp_url = expected_cdp_url or _get_cdp_override()
     if not cdp_url:
         # Fallback: active session may carry a per-session CDP URL from a
         # cloud provider (Browserbase sets this).
@@ -456,6 +631,12 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
             dialog_timeout_s=timeout_s,
         )
     except Exception as exc:
+        if required:
+            logger.warning(
+                "Required assigned-browser supervisor attach failed: %s",
+                type(exc).__name__,
+            )
+            raise BrowserRouteUnavailableError(_ROUTE_ERROR_MESSAGE) from None
         logger.debug(
             "CDP supervisor attach for task=%s failed (non-fatal): %s",
             task_id,
@@ -1147,6 +1328,7 @@ def _navigation_session_key(task_id: str, url: str) -> str:
     """
     if task_id is None:
         task_id = "default"
+    task_id = _route_scoped_task_key(task_id)
     if _get_cdp_override():
         return task_id
     if _is_camofox_mode():
@@ -1175,7 +1357,8 @@ def _last_session_key(task_id: str) -> str:
     """
     if task_id is None:
         task_id = "default"
-    return _last_active_session_key.get(task_id, task_id)
+    scoped_task_id = _route_scoped_task_key(task_id)
+    return _last_active_session_key.get(scoped_task_id, scoped_task_id)
 
 
 def _allow_private_urls() -> bool:
@@ -1239,6 +1422,33 @@ _recording_sessions: set = set()  # session_keys with active recordings
 # sidecar would fall back to the cloud session on its next snapshot call.
 _last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
 _LOCAL_SUFFIX = "::local"
+
+# Reverse index used when task-level cleanup must reap sessions created for
+# more than one mapped gateway identity. Scoped keys contain only a digest;
+# raw platform user IDs never enter process/session names or logs.
+_scoped_session_keys_by_base: Dict[str, set[str]] = {}
+
+
+def _identity_scoped_task_key(task_id: str, identity: Tuple[str, str]) -> str:
+    """Return an opaque per-identity task key without mutating route state."""
+    base_task_id = task_id or "default"
+    digest = hashlib.sha256(f"{identity[0]}\0{identity[1]}".encode("utf-8")).hexdigest()[:16]
+    return f"{base_task_id}::route:{digest}"
+
+
+def _route_scoped_task_key(task_id: str) -> str:
+    """Scope a task key to its mapped gateway identity using an opaque digest."""
+    base_task_id = task_id or "default"
+    route = _matching_session_cdp_route(_read_browser_config())
+    if route is None:
+        return base_task_id
+    identity = _current_gateway_identity()
+    if identity is None:  # defensive; a matched route necessarily has one
+        return base_task_id
+    scoped = _identity_scoped_task_key(base_task_id, identity)
+    with _cleanup_lock:
+        _scoped_session_keys_by_base.setdefault(base_task_id, set()).add(scoped)
+    return scoped
 
 # Flag to track if cleanup has been done
 _cleanup_done = False
@@ -1710,14 +1920,39 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     """Create a session that connects to a user-supplied CDP endpoint."""
     import uuid
     session_name = f"cdp_{uuid.uuid4().hex[:10]}"
-    logger.info("Created CDP browser session %s → %s for task %s",
-                session_name, cdp_url, task_id)
+    logger.info("Created CDP browser session %s for task %s", session_name, task_id)
     return {
         "session_name": session_name,
         "bb_session_id": None,
         "cdp_url": cdp_url,
         "features": {"cdp_override": True},
     }
+
+
+def _discard_stale_mapped_session(task_id: str, session_info: Dict[str, Any]) -> None:
+    """Forget a mapped session whose named endpoint changed, without reconnecting it."""
+    _stop_cdp_supervisor(task_id)
+    with _cleanup_lock:
+        if _active_sessions.get(task_id) is session_info:
+            _active_sessions.pop(task_id, None)
+            _session_last_activity.pop(task_id, None)
+
+    # The agent-browser daemon is endpoint-bound. Terminate it directly rather
+    # than issuing a command that could reconnect to the stale endpoint.
+    session_name = str(session_info.get("session_name") or "")
+    if not session_name:
+        return
+    socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{session_name}")
+    pid_file = os.path.join(socket_dir, f"{session_name}.pid")
+    if os.path.isfile(pid_file):
+        try:
+            from tools.process_registry import ProcessRegistry
+
+            daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
+            ProcessRegistry._terminate_host_pid(daemon_pid)
+        except (ProcessLookupError, ValueError, PermissionError, OSError):
+            pass
+    shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
@@ -1747,19 +1982,39 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
     # Update activity timestamp for this session
     _update_session_activity(task_id)
 
-    with _cleanup_lock:
-        # Check if we already have a session for this task
-        if task_id in _active_sessions:
-            return _active_sessions[task_id]
-
     # Hybrid routing: session keys ending with ``::local`` force a local
-    # Chromium regardless of the globally-configured cloud provider.  Public
-    # URLs in the same conversation continue to use the cloud session under
-    # the bare task_id key.
+    # Chromium regardless of the globally-configured cloud provider.
     force_local = _is_local_sidecar_key(task_id)
+    mapped_route = False
+    resolved_cdp_url = ""
+    mapped_cdp_url = ""
+    if not force_local:
+        resolved_cdp_url, mapped_route = _resolve_cdp_route_state()
+        if mapped_route:
+            mapped_cdp_url = resolved_cdp_url
 
-    # Create session outside the lock (network call in cloud mode)
-    cdp_override = _get_cdp_override()
+    with _cleanup_lock:
+        existing_session = _active_sessions.get(task_id)
+    if existing_session is not None:
+        if mapped_route:
+            if str(existing_session.get("cdp_url") or "") != mapped_cdp_url:
+                _discard_stale_mapped_session(task_id, existing_session)
+                existing_session = None
+            else:
+                _ensure_cdp_supervisor(
+                    task_id,
+                    required=True,
+                    expected_cdp_url=mapped_cdp_url,
+                )
+        if existing_session is not None:
+            return existing_session
+
+    # Create session outside the lock (network call in cloud mode). Preserve
+    # the established global-override seam for non-mapped callers, while mapped
+    # identities retain the endpoint from their single routing snapshot.
+    cdp_override = ""
+    if not force_local:
+        cdp_override = mapped_cdp_url if mapped_route else _get_cdp_override()
     if cdp_override and not force_local:
         session_info = _create_cdp_session(task_id, cdp_override)
     elif force_local:
@@ -1811,10 +2066,29 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
 
     # Lazy-start the CDP supervisor now that the session exists (if the
     # backend surfaces a CDP URL via override or session_info["cdp_url"]).
-    # Idempotent; swallows errors. See _ensure_cdp_supervisor for details.
+    # Idempotent and best-effort for legacy routes. A mapped per-user route is
+    # mandatory, so supervisor attachment is its active WebSocket health check.
     # Skip for local sidecars — they have no CDP URL.
     if not force_local:
-        _ensure_cdp_supervisor(task_id)
+        try:
+            if mapped_route:
+                _ensure_cdp_supervisor(
+                    task_id,
+                    required=True,
+                    expected_cdp_url=mapped_cdp_url,
+                )
+            else:
+                # Preserve one-argument compatibility for best-effort hooks.
+                _ensure_cdp_supervisor(task_id)
+        except BrowserRouteUnavailableError:
+            # Remove this just-created, unverified mapped session. No cloud or
+            # local fallback is attempted for a mandatory identity route.
+            with _cleanup_lock:
+                if _active_sessions.get(task_id) is session_info:
+                    _active_sessions.pop(task_id, None)
+                    _session_last_activity.pop(task_id, None)
+            _stop_cdp_supervisor(task_id)
+            raise
 
     return session_info
 
@@ -1971,6 +2245,15 @@ def _run_browser_command(
         timeout = _get_command_timeout()
     args = args or []
 
+    # Resolve mandatory identity routing before any local/global backend checks.
+    # A malformed or unavailable assigned route must not reach Camofox, cloud,
+    # local Chromium, or the Lightpanda Chrome fallback.
+    try:
+        resolved_endpoint, mapped_route = _resolve_cdp_route_state()
+        mapped_endpoint = resolved_endpoint if mapped_route else ""
+    except BrowserRouteUnavailableError:
+        return _route_error_result()
+
     # Build the command
     try:
         browser_cmd = _find_agent_browser()
@@ -2009,6 +2292,8 @@ def _run_browser_command(
     # Get session info (creates Browserbase session with proxies if needed)
     try:
         session_info = _get_session_info(task_id)
+    except BrowserRouteUnavailableError:
+        return _route_error_result()
     except Exception as e:
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
@@ -2175,10 +2460,15 @@ def _run_browser_command(
                 except OSError:
                     pass
 
-            # Log stderr for diagnostics — use warning level on failure so it's visible
+            # Log stderr for diagnostics — mapped endpoints are never emitted.
             if stderr and stderr.strip():
                 level = logging.WARNING if returncode != 0 else logging.DEBUG
-                logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
+                stderr_for_log = (
+                    _redact_mapped_endpoint_text(stderr.strip(), mapped_endpoint)
+                    if mapped_route
+                    else stderr.strip()
+                )
+                logger.log(level, "browser '%s' stderr: %s", command, stderr_for_log[:500])
 
             stdout_text = stdout.strip()
 
@@ -2201,8 +2491,13 @@ def _run_browser_command(
                     result = parsed
                 except json.JSONDecodeError:
                     raw = stdout_text[:2000]
+                    raw_for_log = (
+                        _redact_mapped_endpoint_text(raw, mapped_endpoint)
+                        if mapped_route
+                        else raw
+                    )
                     logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                                   command, returncode, raw[:500])
+                                   command, returncode, raw_for_log[:500])
 
                     if command == "screenshot":
                         stderr_text = (stderr or "").strip()
@@ -2236,20 +2531,31 @@ def _run_browser_command(
             elif returncode != 0:
                 # Check for errors
                 error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
-                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
+                error_for_log = (
+                    _redact_mapped_endpoint_text(error_msg, mapped_endpoint)
+                    if mapped_route
+                    else error_msg
+                )
+                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_for_log[:300])
                 result = {"success": False, "error": error_msg}
             else:
                 result = {"success": True, "data": {}}
 
     except Exception as e:
-        logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
-        result = {"success": False, "error": str(e)}
+        error_text = (
+            _redact_mapped_endpoint_text(e, mapped_endpoint) if mapped_route else str(e)
+        )
+        logger.warning("browser '%s' exception: %s", command, error_text)
+        result = {"success": False, "error": error_text}
+
+    if mapped_route:
+        result = _redact_mapped_command_result(result, mapped_endpoint)
 
     # --- Lightpanda automatic Chrome fallback ---
     # If engine is lightpanda and the result looks broken, retry with Chrome.
     # This runs for ALL exit paths (timeout, empty, non-JSON, nonzero rc, parsed).
     fallback_reason = _lightpanda_fallback_reason(engine, command, result)
-    if fallback_reason:
+    if fallback_reason and not mapped_route:
         logger.info(
             "Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s",
             command,
@@ -2358,6 +2664,7 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+@_route_error_guard
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2392,7 +2699,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # cloud provider never sees the URL in that case.  Can also be opted
     # out globally via ``browser.allow_private_urls`` in config.
     effective_task_id = task_id or "default"
-    nav_session_key = _navigation_session_key(effective_task_id, url)
+    try:
+        base_session_key = _route_scoped_task_key(effective_task_id)
+        nav_session_key = _navigation_session_key(effective_task_id, url)
+    except BrowserRouteUnavailableError:
+        return json.dumps(_route_error_result())
     auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
 
     # Always-blocked floor: cloud metadata / IMDS endpoints are denied
@@ -2428,7 +2739,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         })
 
     # Camofox backend — delegate after safety checks pass
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_navigate
         return camofox_navigate(url, task_id)
 
@@ -2443,7 +2754,10 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 
     # Get session info to check if this is a new session
     # (will create one with features logged if not exists)
-    session_info = _get_session_info(nav_session_key)
+    try:
+        session_info = _get_session_info(nav_session_key)
+    except BrowserRouteUnavailableError:
+        return json.dumps(_route_error_result())
     is_first_nav = session_info.get("_first_nav", True)
 
     # Auto-start recording if configured and this is first navigation
@@ -2456,7 +2770,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # Remember which session served this nav so snapshot/click/fill/...
     # on the same task_id hit it (critical when hybrid routing has both a
     # cloud session and a local sidecar alive concurrently).
-    _last_active_session_key[effective_task_id] = nav_session_key
+    _last_active_session_key[base_session_key] = nav_session_key
 
     if result.get("success"):
         data = result.get("data", {})
@@ -2558,6 +2872,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         }, ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_snapshot(
     full: bool = False,
     task_id: Optional[str] = None,
@@ -2574,7 +2889,7 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
 
@@ -2610,7 +2925,13 @@ def browser_snapshot(
         # website/docs/developer-guide/browser-supervisor.md.
         try:
             from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-            _supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+            with _cleanup_lock:
+                _expected_cdp_url = str(
+                    _active_sessions.get(effective_task_id, {}).get("cdp_url") or ""
+                ) or None
+            _supervisor = SUPERVISOR_REGISTRY.get(
+                effective_task_id, expected_cdp_url=_expected_cdp_url
+            )
             if _supervisor is not None:
                 _sv_snap = _supervisor.snapshot()
                 if _sv_snap.active:
@@ -2627,6 +2948,7 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     """
     Click on an element.
@@ -2638,7 +2960,7 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
 
@@ -2664,6 +2986,7 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     """
     Type text into an input field.
@@ -2676,7 +2999,7 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
 
@@ -2704,6 +3027,7 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     """
     Scroll the page.
@@ -2727,7 +3051,7 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_scroll
         # Camofox REST API doesn't support pixel args; use repeated calls
         _SCROLL_REPEATS = 5
@@ -2753,6 +3077,7 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_back(task_id: Optional[str] = None) -> str:
     """
     Navigate back in browser history.
@@ -2763,7 +3088,7 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
 
@@ -2785,6 +3110,7 @@ def browser_back(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_press(key: str, task_id: Optional[str] = None) -> str:
     """
     Press a keyboard key.
@@ -2796,7 +3122,7 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
 
@@ -2820,6 +3146,7 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
 
 
 
+@_route_error_guard
 def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
     """Get browser console messages and JavaScript errors, or evaluate JS in the page.
 
@@ -2840,7 +3167,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return _browser_eval(expression, task_id)
 
     # --- Console output mode (original behaviour) ---
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_console
         return camofox_console(clear, task_id)
 
@@ -2884,7 +3211,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
 
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
-    if _is_camofox_mode():
+    if _camofox_allowed():
         return _camofox_eval(expression, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
@@ -2897,7 +3224,13 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     # supervisor is running (e.g. plain agent-browser without a CDP backend).
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-        supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+        with _cleanup_lock:
+            expected_cdp_url = str(
+                _active_sessions.get(effective_task_id, {}).get("cdp_url") or ""
+            ) or None
+        supervisor = SUPERVISOR_REGISTRY.get(
+            effective_task_id, expected_cdp_url=expected_cdp_url
+        )
         if supervisor is not None:
             sup_result = supervisor.evaluate_runtime(expression)
             if sup_result.get("ok"):
@@ -3055,6 +3388,7 @@ def _maybe_stop_recording(task_id: str):
             _recording_sessions.discard(task_id)
 
 
+@_route_error_guard
 def browser_get_images(task_id: Optional[str] = None) -> str:
     """
     Get all images on the current page.
@@ -3065,7 +3399,7 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with list of images (src and alt)
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_get_images
         return camofox_get_images(task_id)
 
@@ -3116,6 +3450,7 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_route_error_guard
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> str:
     """
     Take a screenshot of the current page and analyze it with vision AI.
@@ -3136,7 +3471,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     Returns:
         JSON string with vision analysis results and screenshot_path
     """
-    if _is_camofox_mode():
+    if _camofox_allowed():
         from tools.browser_camofox import camofox_vision
         return camofox_vision(question, annotate, task_id)
 
@@ -3424,26 +3759,69 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     if task_id is None:
         task_id = "default"
 
-    # Expand to the full set of session keys to reap. For a bare task_id
-    # that includes the cloud/primary key + the local sidecar if one exists.
+    # Expand to the full set of session keys to reap. A mapped gateway caller
+    # may only reap its own identity-scoped key, even when another caller used
+    # the same base task ID. Process-wide cleanup iterates exact keys separately.
+    is_route_scoped_key = "::route:" in task_id
+    current_scoped_key = None
     if _is_local_sidecar_key(task_id):
         session_keys = [task_id]
         bare_task_id = task_id[: -len(_LOCAL_SUFFIX)]
-    else:
+    elif is_route_scoped_key:
         session_keys = [task_id]
-        sidecar_key = f"{task_id}{_LOCAL_SUFFIX}"
-        with _cleanup_lock:
-            if sidecar_key in _active_sessions:
-                session_keys.append(sidecar_key)
+        bare_task_id = task_id
+    else:
+        identity = _current_gateway_identity()
+        if identity is not None:
+            # A gateway identity with a matched or malformed route must never
+            # fall through to a shared bare task key. Reaping an absent opaque
+            # key is harmless; reaping another caller's global session is not.
+            try:
+                route = _matching_session_cdp_route(_read_browser_config())
+            except BrowserRouteUnavailableError:
+                route = {"fail_closed": True}
+            if route is not None:
+                current_scoped_key = _identity_scoped_task_key(task_id, identity)
+
+        if current_scoped_key is not None:
+            session_keys = [current_scoped_key]
+        else:
+            session_keys = [task_id]
+            sidecar_key = f"{task_id}{_LOCAL_SUFFIX}"
+            with _cleanup_lock:
+                if sidecar_key in _active_sessions:
+                    session_keys.append(sidecar_key)
         bare_task_id = task_id
 
     for session_key in session_keys:
         _cleanup_single_browser_session(session_key)
 
+    if current_scoped_key is not None:
+        with _cleanup_lock:
+            scoped_keys = _scoped_session_keys_by_base.get(task_id)
+            if scoped_keys is not None:
+                scoped_keys.discard(current_scoped_key)
+                if not scoped_keys:
+                    _scoped_session_keys_by_base.pop(task_id, None)
+            _last_active_session_key.pop(current_scoped_key, None)
+
+    # Exact routed-key cleanup is also used by inactivity/shutdown sweeps. Drop
+    # its reverse-index membership and last-active pointer so long-lived gateway
+    # processes do not accumulate opaque route keys.
+    if is_route_scoped_key:
+        with _cleanup_lock:
+            for base_key, scoped_keys in list(_scoped_session_keys_by_base.items()):
+                scoped_keys.discard(task_id)
+                if not scoped_keys:
+                    _scoped_session_keys_by_base.pop(base_key, None)
+            _last_active_session_key.pop(task_id, None)
+
     # Drop the last-active pointer only when the bare task is being cleaned
     # (i.e. not when we're only reaping a sidecar mid-task).
-    if not _is_local_sidecar_key(task_id):
+    if not _is_local_sidecar_key(task_id) and not is_route_scoped_key:
         _last_active_session_key.pop(bare_task_id, None)
+        for session_key in session_keys:
+            _last_active_session_key.pop(session_key, None)
 
 
 def _cleanup_single_browser_session(task_id: str) -> None:
@@ -3681,12 +4059,20 @@ def check_browser_requirements() -> bool:
     Returns:
         True if all requirements are met, False otherwise
     """
-    # Camofox backend — only needs the server URL, no agent-browser CLI
+    # A mapped gateway identity owns its assigned endpoint. It may not be
+    # satisfied by Camofox, a cloud provider, or a local browser fallback.
+    try:
+        if _mapped_route_required():
+            return bool(_get_cdp_override())
+    except BrowserRouteUnavailableError:
+        return False
+
+    # Camofox backend — only needs the server URL, no agent-browser CLI.
     if _is_camofox_mode():
         return True
 
-    # CDP override mode can connect to an existing remote/local browser endpoint
-    # without requiring the local agent-browser binary on PATH.
+    # A global CDP override can connect to an existing remote/local browser
+    # endpoint without requiring the local agent-browser binary on PATH.
     if _get_cdp_override():
         return True
 

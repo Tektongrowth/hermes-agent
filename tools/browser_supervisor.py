@@ -1372,10 +1372,21 @@ class _SupervisorRegistry:
         self._lock = threading.Lock()
         self._by_task: Dict[str, CDPSupervisor] = {}
 
-    def get(self, task_id: str) -> Optional[CDPSupervisor]:
-        """Return the supervisor for ``task_id`` if running, else ``None``."""
+    def get(
+        self, task_id: str, *, expected_cdp_url: Optional[str] = None
+    ) -> Optional[CDPSupervisor]:
+        """Return a healthy supervisor for the task and expected endpoint."""
         with self._lock:
-            return self._by_task.get(task_id)
+            supervisor = self._by_task.get(task_id)
+            if supervisor is None:
+                return None
+            if expected_cdp_url is not None and supervisor.cdp_url != expected_cdp_url:
+                return None
+            thread_ok = supervisor._thread is not None and supervisor._thread.is_alive()
+            loop_ok = supervisor._loop is not None and supervisor._loop.is_running()
+            if not thread_ok or not loop_ok or not getattr(supervisor, "_active", True):
+                return None
+            return supervisor
 
     def get_or_start(
         self,
@@ -1397,7 +1408,7 @@ class _SupervisorRegistry:
                 if existing.cdp_url == cdp_url:
                     thread_ok = existing._thread is not None and existing._thread.is_alive()
                     loop_ok = existing._loop is not None and existing._loop.is_running()
-                    if thread_ok and loop_ok:
+                    if thread_ok and loop_ok and getattr(existing, "_active", True):
                         return existing
                     # Unhealthy — tear down and recreate.
                 # URL changed or unhealthy — tear down, fall through to re-create.
@@ -1412,14 +1423,24 @@ class _SupervisorRegistry:
             dialog_timeout_s=dialog_timeout_s,
         )
         supervisor.start(timeout=start_timeout)
+        loser_to_stop = None
         with self._lock:
             # Guard against a concurrent get_or_start from another thread.
             already = self._by_task.get(task_id)
             if already is not None and already.cdp_url == cdp_url:
-                supervisor.stop()
-                return already
-            self._by_task[task_id] = supervisor
-        return supervisor
+                winner = already
+                loser_to_stop = supervisor
+            else:
+                winner = supervisor
+                if already is not None:
+                    loser_to_stop = already
+                self._by_task[task_id] = supervisor
+        # Never stop a supervisor while holding the registry lock. A concurrent
+        # caller may have installed a different endpoint while this candidate
+        # was starting; retire whichever instance lost the final comparison.
+        if loser_to_stop is not None:
+            loser_to_stop.stop()
+        return winner
 
     def stop(self, task_id: str) -> None:
         """Stop and discard the supervisor for ``task_id`` if it exists."""

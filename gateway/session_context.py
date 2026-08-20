@@ -61,6 +61,17 @@ _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
 
+
+def has_gateway_context() -> bool:
+    """Return whether this execution context was initialized by the gateway.
+
+    Environment-only legacy session values do not count. This lets security-
+    sensitive routing distinguish a real task-local gateway turn from CLI or
+    cron processes that happen to inherit ``HERMES_SESSION_*`` variables.
+    """
+    return _SESSION_PLATFORM.get() is not _UNSET and _SESSION_USER_ID.get() is not _UNSET
+
+
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
 _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)

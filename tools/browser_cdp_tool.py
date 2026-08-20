@@ -68,19 +68,39 @@ def _run_async(coro):
 # ---------------------------------------------------------------------------
 
 
+class _ResolvedCdpEndpoint(str):
+    """String endpoint carrying route metadata from the same config snapshot."""
+
+    mapped_route: bool
+
+    def __new__(cls, value: str, *, mapped_route: bool = False):
+        instance = super().__new__(cls, value)
+        instance.mapped_route = mapped_route
+        return instance
+
+
 def _resolve_cdp_endpoint() -> str:
     """Return the normalized CDP WebSocket URL, or empty string if unavailable.
 
-    Delegates to ``tools.browser_tool._get_cdp_override`` so precedence stays
-    consistent with the rest of the browser tool surface:
-
-    1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
-    2. ``browser.cdp_url`` in ``config.yaml``
+    Delegates to ``tools.browser_tool._resolve_cdp_route_state`` so endpoint
+    precedence and mapped-route status come from one config snapshot.
     """
     try:
-        from tools.browser_tool import _get_cdp_override  # type: ignore[import-not-found]
-
-        return (_get_cdp_override() or "").strip()
+        from tools.browser_tool import (  # type: ignore[import-not-found]
+            BrowserRouteUnavailableError,
+            _resolve_cdp_route_state,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("browser_cdp: failed to import endpoint resolver: %s", exc)
+        return ""
+    try:
+        endpoint, mapped_route = _resolve_cdp_route_state()
+        return _ResolvedCdpEndpoint(
+            (endpoint or "").strip(),
+            mapped_route=mapped_route,
+        )
+    except BrowserRouteUnavailableError:
+        raise
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
         return ""
@@ -210,7 +230,22 @@ def _browser_cdp_via_supervisor(
             f"Browserbase session."
         )
 
-    supervisor = SUPERVISOR_REGISTRY.get(task_id)
+    from tools.browser_tool import (  # type: ignore[import-not-found]
+        BrowserRouteUnavailableError,
+        _get_cdp_override,
+        _route_error_result,
+        _route_scoped_task_key,
+    )
+
+    try:
+        scoped_task_id = _route_scoped_task_key(task_id)
+        expected_cdp_url = _get_cdp_override() or None
+    except BrowserRouteUnavailableError:
+        return json.dumps(_route_error_result())
+
+    supervisor = SUPERVISOR_REGISTRY.get(
+        scoped_task_id, expected_cdp_url=expected_cdp_url
+    )
     if supervisor is None:
         return tool_error(
             f"No CDP supervisor is attached for task={task_id!r}. Call "
@@ -354,7 +389,16 @@ def browser_cdp(
             "Install it with: pip install websockets"
         )
 
-    endpoint = _resolve_cdp_endpoint()
+    mapped_route = False
+    try:
+        endpoint = _resolve_cdp_endpoint()
+        mapped_route = bool(getattr(endpoint, "mapped_route", False))
+    except Exception as exc:
+        from tools.browser_tool import BrowserRouteUnavailableError, _route_error_result
+
+        if isinstance(exc, BrowserRouteUnavailableError):
+            return json.dumps(_route_error_result())
+        raise
     if not endpoint:
         return tool_error(
             "No CDP endpoint is available. Run '/browser connect' to attach "
@@ -389,21 +433,36 @@ def browser_cdp(
             _cdp_call(endpoint, method, call_params, target_id, safe_timeout)
         )
     except asyncio.TimeoutError as exc:
+        if mapped_route:
+            from tools.browser_tool import _route_error_result
+            return json.dumps(_route_error_result())
         return tool_error(
             f"CDP call timed out after {safe_timeout}s: {exc}",
             method=method,
         )
     except TimeoutError as exc:
+        if mapped_route:
+            from tools.browser_tool import _route_error_result
+            return json.dumps(_route_error_result())
         return tool_error(str(exc), method=method)
     except RuntimeError as exc:
+        if mapped_route:
+            from tools.browser_tool import _route_error_result
+            return json.dumps(_route_error_result())
         return tool_error(str(exc), method=method)
     except WebSocketException as exc:
+        if mapped_route:
+            from tools.browser_tool import _route_error_result
+            return json.dumps(_route_error_result())
         return tool_error(
             f"WebSocket error talking to CDP at {endpoint}: {exc}. The "
             "browser may have disconnected — try '/browser connect' again.",
             method=method,
         )
     except Exception as exc:  # pragma: no cover — unexpected
+        if mapped_route:
+            from tools.browser_tool import _route_error_result
+            return json.dumps(_route_error_result())
         logger.exception("browser_cdp unexpected error")
         return tool_error(
             f"Unexpected error: {type(exc).__name__}: {exc}",

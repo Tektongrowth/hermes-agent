@@ -3,12 +3,21 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from gateway.session_context import clear_session_vars, set_session_vars
+
 
 HOST = "example-host"
 PORT = 9223
 WS_URL = f"ws://{HOST}:{PORT}/devtools/browser/abc123"
 HTTP_URL = f"http://{HOST}:{PORT}"
 VERSION_URL = f"{HTTP_URL}/json/version"
+
+
+@pytest.fixture(autouse=True)
+def _clean_gateway_identity():
+    clear_session_vars([])
+    yield
+    clear_session_vars([])
 
 
 class TestResolveCdpOverride:
@@ -127,88 +136,63 @@ class TestSessionCdpRouting:
     GLOBAL_WS = "ws://127.0.0.1:9230/devtools/browser/mac-mini"
 
     @staticmethod
-    def _config(route):
+    def _config(route_name="rico-windows", route_url=RICO_WS, *, routes=None):
         return {
             "browser": {
                 "cdp_url": TestSessionCdpRouting.GLOBAL_WS,
-                "cdp_routes": [route],
+                "cdp_endpoints": {route_name: {"url": route_url}},
+                "cdp_routes": routes
+                if routes is not None
+                else {"discord": {TestSessionCdpRouting.RICO_ID: route_name}},
             }
         }
 
     def test_matching_discord_user_route_overrides_global_env_and_config(self, monkeypatch):
         import tools.browser_tool as browser_tool
-        from gateway.session_context import set_session_vars
 
         set_session_vars(platform="discord", user_id=self.RICO_ID)
         monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
-        route = {
-            "name": "rico-windows",
-            "platform": "discord",
-            "user_ids": [self.RICO_ID],
-            "cdp_url": self.RICO_WS,
-        }
 
-        with patch("hermes_cli.config.read_raw_config", return_value=self._config(route)):
+        with patch("hermes_cli.config.read_raw_config", return_value=self._config()):
             assert browser_tool._get_cdp_override() == self.RICO_WS
 
     def test_routes_accept_json_string_from_config_cli(self, monkeypatch):
         import tools.browser_tool as browser_tool
-        from gateway.session_context import set_session_vars
 
         set_session_vars(platform="discord", user_id=self.RICO_ID)
         monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
-        route = {
-            "name": "rico-windows",
-            "platform": "discord",
-            "user_ids": [self.RICO_ID],
-            "cdp_url": self.RICO_WS,
-        }
-        cfg = {
-            "browser": {
-                "cdp_url": self.GLOBAL_WS,
-                "cdp_routes": json.dumps([route]),
-            }
-        }
+        routes = json.dumps({"discord": {self.RICO_ID: "rico-windows"}})
 
-        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+        with patch(
+            "hermes_cli.config.read_raw_config",
+            return_value=self._config(routes=routes),
+        ):
             assert browser_tool._get_cdp_override() == self.RICO_WS
 
     def test_nonmatching_user_keeps_existing_global_override(self, monkeypatch):
         import tools.browser_tool as browser_tool
-        from gateway.session_context import set_session_vars
 
         set_session_vars(platform="discord", user_id="someone-else")
         monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
-        route = {
-            "name": "rico-windows",
-            "platform": "discord",
-            "user_ids": [self.RICO_ID],
-            "cdp_url": self.RICO_WS,
-        }
 
-        with patch("hermes_cli.config.read_raw_config", return_value=self._config(route)):
+        with patch("hermes_cli.config.read_raw_config", return_value=self._config()):
             assert browser_tool._get_cdp_override() == self.GLOBAL_WS
 
     def test_matching_route_without_endpoint_fails_closed(self, monkeypatch):
         import tools.browser_tool as browser_tool
-        from gateway.session_context import set_session_vars
 
         set_session_vars(platform="discord", user_id=self.RICO_ID)
         monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
-        route = {
-            "name": "rico-windows",
-            "platform": "discord",
-            "user_ids": [self.RICO_ID],
-            "cdp_url": "",
-        }
 
-        with patch("hermes_cli.config.read_raw_config", return_value=self._config(route)):
-            with pytest.raises(browser_tool.BrowserRouteUnavailableError, match="rico-windows"):
+        with patch(
+            "hermes_cli.config.read_raw_config",
+            return_value=self._config(route_url=""),
+        ):
+            with pytest.raises(browser_tool.BrowserRouteUnavailableError):
                 browser_tool._get_cdp_override()
 
-    def test_route_can_explicitly_allow_global_fallback(self, monkeypatch):
+    def test_removed_list_route_cannot_opt_out_of_fail_closed(self, monkeypatch):
         import tools.browser_tool as browser_tool
-        from gateway.session_context import set_session_vars
 
         set_session_vars(platform="discord", user_id=self.RICO_ID)
         monkeypatch.setenv("BROWSER_CDP_URL", self.GLOBAL_WS)
@@ -220,5 +204,9 @@ class TestSessionCdpRouting:
             "fail_closed": False,
         }
 
-        with patch("hermes_cli.config.read_raw_config", return_value=self._config(route)):
-            assert browser_tool._get_cdp_override() == self.GLOBAL_WS
+        with patch(
+            "hermes_cli.config.read_raw_config",
+            return_value=self._config(routes=[route]),
+        ):
+            with pytest.raises(browser_tool.BrowserRouteUnavailableError):
+                browser_tool._get_cdp_override()

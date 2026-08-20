@@ -346,24 +346,29 @@ When connected via CDP, all browser tools (`browser_navigate`, `browser_click`, 
 
 #### Route gateway users to separate CDP browsers
 
-A shared gateway can route browser calls to different CDP endpoints by stable platform user ID. Configure `browser.cdp_routes` as an ordered list:
+A shared gateway can route browser calls to named CDP endpoints by stable platform user ID. Define the endpoints once, then map each user ID to an endpoint name:
 
 ```yaml
 browser:
-  cdp_url: http://127.0.0.1:9230  # global/default browser
+  cdp_url: http://127.0.0.1:9230  # global/default browser for unmapped callers
+  cdp_endpoints:
+    rico_windows:
+      url: ${RICO_BROWSER_CDP_URL}
+    jakob_local:
+      url: http://127.0.0.1:9242
   cdp_routes:
-    - name: rico-windows
-      platform: discord
-      user_ids:
-        - "1378208835302592534"
-      cdp_url: http://127.0.0.1:9241
+    discord:
+      "1378208835302592534": rico_windows
+      "998877665544332211": jakob_local
 ```
 
-A matching route takes precedence over both `BROWSER_CDP_URL` and the global `browser.cdp_url`. Match on immutable platform user IDs, not display names.
+A matching route takes precedence over `BROWSER_CDP_URL` and the global `browser.cdp_url`. Use immutable platform user IDs, not display names, channel names, or message text. Platform keys are normalized, so duplicate forms such as `discord` and ` Discord ` make the route configuration invalid.
 
-Matching routes fail closed by default. If the route has no `cdp_url`, Hermes returns an error instead of opening the global browser. Set `fail_closed: false` only when cross-user fallback is intentionally safe.
+Matching routes always fail closed. If the endpoint is missing, malformed, or unavailable, Hermes returns `browser_route_unavailable`. It does not use the global browser, Camofox, a cloud provider, or a temporary local browser. Browser task state and CDP supervisors are also scoped to the mapped identity, so two users cannot share a browser session through the same gateway task ID.
 
-Keep remote CDP private. Bind Chrome remote debugging to loopback on the user's computer, use a dedicated `--user-data-dir`, and carry CDP through a private VPN or authenticated SSH tunnel. Do not expose a Chrome debugging port directly to the public internet.
+For HTTP discovery endpoints, Hermes keeps the returned WebSocket path but pins the connection to the configured endpoint authority. A browser cannot redirect an assigned route to a different host or port through `/json/version`.
+
+Keep remote CDP private. Bind Chrome remote debugging to loopback on the user's computer, use a dedicated `--user-data-dir`, and carry CDP through a private VPN or authenticated SSH tunnel. Do not expose a Chrome debugging port directly to the public internet. Environment variables are supported in endpoint URLs, which keeps credentials and tunnel addresses out of `config.yaml`.
 
 ### WSL2 + Windows Chrome: prefer MCP over `/browser connect`
 
