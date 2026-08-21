@@ -444,7 +444,7 @@ def test_job_brief_normalizes_provider_naive_utc_event_timestamps(
             "endUtc": "2026-08-22T20:00:00",
             "allDay": False,
             "crewForemanEmail": None,
-            "dailyManhours": 8,
+            "dailyManhours": None,
             "workAreaNames": [],
         }
     ]
@@ -461,6 +461,7 @@ def test_job_brief_normalizes_provider_naive_utc_event_timestamps(
 
     assert result["scheduled_events"][0]["start_utc"] == "2026-08-22T12:00:00Z"
     assert result["scheduled_events"][0]["end_utc"] == "2026-08-22T20:00:00Z"
+    assert result["scheduled_events"][0]["daily_labor_hours"] is None
     _assert_no_forbidden_keys(result)
 
 

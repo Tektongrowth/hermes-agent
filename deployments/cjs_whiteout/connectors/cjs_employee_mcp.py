@@ -35,6 +35,12 @@ def _required_number(value: Any, label: str) -> float:
     return parsed
 
 
+def _required_nullable_number(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    return _required_number(value, label)
+
+
 def _required_finite_result(value: float, label: str) -> float:
     if not math.isfinite(value):
         raise RuntimeError(f"Malformed {label}")
@@ -617,7 +623,7 @@ def _build_job_brief(
                 "crew_foreman_email": _optional_scalar(
                     row.get("crewForemanEmail"), "job schedule event crew foreman"
                 ),
-                "daily_labor_hours": _required_number(
+                "daily_labor_hours": _required_nullable_number(
                     row.get("dailyManhours"), "job schedule event"
                 ),
                 "work_area_names": [
