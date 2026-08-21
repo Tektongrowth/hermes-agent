@@ -97,7 +97,19 @@ class FakeTree:
 
 
 @pytest.fixture
-def adapter():
+def adapter(monkeypatch):
+    # Keep adapter behavior deterministic instead of inheriting the live
+    # gateway's channel allowlist and routing environment.
+    for env_name in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+        "DISCORD_REQUIRE_MENTION",
+        "DISCORD_AUTO_THREAD",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
     config = PlatformConfig(enabled=True, token="***")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(
@@ -111,6 +123,10 @@ def adapter():
     # so registration / dispatch / thread behavior tests don't have to
     # construct a full auth context (allowlist / channel scope).
     adapter._check_slash_authorization = AsyncMock(return_value=True)
+    # These generic dispatch tests must not inherit the operator's live
+    # principal policy from ~/.hermes/config.yaml. Policy-active behavior is
+    # covered independently by the rollout security suite.
+    adapter._principal_policy_active = MagicMock(return_value=False)
     return adapter
 
 
