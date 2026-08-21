@@ -335,6 +335,80 @@ def test_schedule_returns_safe_events_for_active_jobs_only(
     _assert_no_forbidden_keys(result)
 
 
+def test_schedule_treats_null_crew_members_as_unassigned(
+    active_jobs: list[dict[str, Any]],
+) -> None:
+    event = {
+        "id": 7001,
+        "jobId": 101,
+        "jobName": "Front Walk",
+        "jobNumber": "26-101",
+        "customer": {"id": 5001, "displayName": "Alice Example"},
+        "property": {
+            "address1": "10 Main St",
+            "address2": "",
+            "city": "Exampleville",
+            "state": "PA",
+            "zip": "19000",
+        },
+        "startUtc": "2026-08-22T12:00:00Z",
+        "endUtc": "2026-08-22T20:00:00Z",
+        "allDay": False,
+        "crewMemberIds": None,
+        "workAreas": [],
+    }
+
+    result = employee._build_schedule(
+        {"events": [event]},
+        active_jobs_by_id=employee._active_jobs_by_id(active_jobs),
+        query="Alice",
+        limit=50,
+    )
+
+    assert result["events"][0]["crew_member_count"] == 0
+    _assert_no_forbidden_keys(result)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ([{}], [True], [0], [-1], ["01"], [1, 1], {}, "1"),
+)
+def test_schedule_rejects_malformed_crew_member_ids(bad_value: Any) -> None:
+    with pytest.raises(RuntimeError, match="Malformed schedule event crew members"):
+        employee._crew_member_count(bad_value)
+
+
+def test_schedule_rejects_missing_crew_member_ids(
+    active_jobs: list[dict[str, Any]],
+) -> None:
+    event = {
+        "id": 7001,
+        "jobId": 101,
+        "jobName": "Front Walk",
+        "jobNumber": "26-101",
+        "customer": {"id": 5001, "displayName": "Alice Example"},
+        "property": {
+            "address1": "10 Main St",
+            "address2": "",
+            "city": "Exampleville",
+            "state": "PA",
+            "zip": "19000",
+        },
+        "startUtc": "2026-08-22T12:00:00Z",
+        "endUtc": "2026-08-22T20:00:00Z",
+        "allDay": False,
+        "workAreas": [],
+    }
+
+    with pytest.raises(RuntimeError, match="Malformed schedule event crew members"):
+        employee._build_schedule(
+            {"events": [event]},
+            active_jobs_by_id=employee._active_jobs_by_id(active_jobs),
+            query="Alice",
+            limit=50,
+        )
+
+
 def test_job_brief_requires_active_job_and_returns_contact_schedule_and_notes(
     active_jobs: list[dict[str, Any]],
 ) -> None:

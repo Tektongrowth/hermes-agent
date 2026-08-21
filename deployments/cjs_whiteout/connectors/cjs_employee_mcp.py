@@ -181,6 +181,20 @@ def _backend_id(value: Any) -> int | None:
     return None
 
 
+def _crew_member_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, list):
+        raise RuntimeError("Malformed schedule event crew members")
+    crew_member_ids: set[int] = set()
+    for raw_id in value:
+        crew_member_id = _backend_id(raw_id)
+        if crew_member_id is None or crew_member_id in crew_member_ids:
+            raise RuntimeError("Malformed schedule event crew members")
+        crew_member_ids.add(crew_member_id)
+    return len(crew_member_ids)
+
+
 def _validated_job_id(value: Any) -> int:
     job_id = _backend_id(value)
     if job_id is None:
@@ -433,14 +447,15 @@ def _build_schedule(
             continue
         customer = source.get("customer")
         property_data = source.get("property")
-        crew_member_ids = source.get("crewMemberIds")
+        if "crewMemberIds" not in source:
+            raise RuntimeError("Malformed schedule event crew members")
+        crew_member_ids = source["crewMemberIds"]
         work_area_rows = source.get("workAreas")
         if not isinstance(customer, dict):
             raise RuntimeError("Malformed schedule event customer")
         if not isinstance(property_data, dict):
             raise RuntimeError("Malformed schedule event property")
-        if not isinstance(crew_member_ids, list):
-            raise RuntimeError("Malformed schedule event crew members")
+        crew_member_count = _crew_member_count(crew_member_ids)
         if not isinstance(work_area_rows, list):
             raise RuntimeError("Malformed schedule event work areas")
 
@@ -494,7 +509,7 @@ def _build_schedule(
                 "crew_foreman_email": _optional_scalar(
                     source.get("crewForemanEmail"), "schedule event crew foreman"
                 ),
-                "crew_member_count": len(crew_member_ids),
+                "crew_member_count": crew_member_count,
                 "work_areas": work_areas,
             }
         )
