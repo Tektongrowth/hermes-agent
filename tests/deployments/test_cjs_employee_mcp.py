@@ -427,6 +427,80 @@ def test_job_brief_requires_active_job_and_returns_contact_schedule_and_notes(
     _assert_no_forbidden_keys(result)
 
 
+def test_job_brief_normalizes_provider_naive_utc_event_timestamps(
+    active_jobs: list[dict[str, Any]],
+) -> None:
+    details = {
+        "id": 101,
+        "name": "Front Walk",
+        "no": "26-101",
+        "type": "Installation",
+        "workAreas": [],
+    }
+    events = [
+        {
+            "id": 7001,
+            "startUtc": "2026-08-22T12:00:00",
+            "endUtc": "2026-08-22T20:00:00",
+            "allDay": False,
+            "crewForemanEmail": None,
+            "dailyManhours": 8,
+            "workAreaNames": [],
+        }
+    ]
+    customer = {
+        "id": 5001,
+        "displayName": "Alice Example",
+        "phones": [],
+        "emails": [],
+    }
+
+    result = employee._build_job_brief(
+        active_jobs[0], details, events, customer, allowed_event_ids={7001}
+    )
+
+    assert result["scheduled_events"][0]["start_utc"] == "2026-08-22T12:00:00Z"
+    assert result["scheduled_events"][0]["end_utc"] == "2026-08-22T20:00:00Z"
+    _assert_no_forbidden_keys(result)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "2026-08-22",
+        "2026-08-22T12:00",
+        "20260822T120000",
+        "2026-08-22x12:00:00",
+        " 2026-08-22T12:00:00",
+        "2026-08-22T12:00:00 ",
+        "\t2026-08-22T12:00:00",
+        "2026-08-22T12:00:00\n",
+        "2026-08-22T12:00:00+01:60",
+        "2026-08-22T12:00:00-01:99",
+        "2026-08-22T12:00:00+24:00",
+    ),
+)
+def test_provider_utc_timestamp_rejects_noncanonical_values(value: str) -> None:
+    with pytest.raises(RuntimeError, match="Malformed provider timestamp"):
+        employee._required_provider_utc_timestamp(value, "provider timestamp")
+
+
+def test_provider_utc_timestamp_normalizes_explicit_offset_to_z() -> None:
+    cleaned, parsed = employee._required_provider_utc_timestamp(
+        "2026-08-22T08:00:00-04:00", "provider timestamp"
+    )
+
+    assert cleaned == "2026-08-22T12:00:00Z"
+    offset = parsed.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
+
+
+def test_general_timestamp_parser_still_rejects_naive_values() -> None:
+    with pytest.raises(RuntimeError, match="Malformed schedule timestamp"):
+        employee._required_timestamp("2026-08-22T12:00:00", "schedule timestamp")
+
+
 def test_validate_job_id_rejects_non_numeric_and_non_positive_values() -> None:
     assert employee._validated_job_id(101) == 101
     assert employee._validated_job_id("101") == 101

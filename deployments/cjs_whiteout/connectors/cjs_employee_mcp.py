@@ -8,7 +8,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -93,6 +93,28 @@ def _required_timestamp(value: Any, label: str) -> tuple[str, datetime]:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise RuntimeError(f"Malformed {label}")
     return cleaned, parsed
+
+
+def _required_provider_utc_timestamp(value: Any, label: str) -> tuple[str, datetime]:
+    """Parse a canonical provider UTC field even when SynkedUP omits the offset."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise RuntimeError(f"Malformed {label}")
+    cleaned = value
+    if not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
+        r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?",
+        cleaned,
+    ):
+        raise RuntimeError(f"Malformed {label}")
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"Malformed {label}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.isoformat().replace("+00:00", "Z"), parsed
 
 
 def _optional_scalar(value: Any, label: str) -> str | None:
@@ -574,10 +596,12 @@ def _build_job_brief(
         )
     scheduled_events = []
     for row in validated_events:
-        start_utc, start = _required_timestamp(
+        start_utc, start = _required_provider_utc_timestamp(
             row.get("startUtc"), "job schedule event timestamp"
         )
-        end_utc, end = _required_timestamp(row.get("endUtc"), "job schedule event timestamp")
+        end_utc, end = _required_provider_utc_timestamp(
+            row.get("endUtc"), "job schedule event timestamp"
+        )
         if end < start:
             raise RuntimeError("Malformed job schedule event timestamp")
         work_area_names = row.get("workAreaNames")
