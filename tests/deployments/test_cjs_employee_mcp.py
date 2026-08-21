@@ -225,7 +225,7 @@ def test_labor_hours_variance_omits_all_cost_fields_and_inactive_jobs(
     result = employee._build_labor_hours_variance(
         rows,
         active_jobs_by_id=employee._active_jobs_by_id(active_jobs),
-        job_id=None,
+        job_id=0,
         only_over_estimate=False,
         limit=50,
     )
@@ -466,6 +466,15 @@ def test_job_brief_normalizes_provider_naive_utc_event_timestamps(
 
 
 @pytest.mark.parametrize(
+    "bad_value",
+    (True, False, {}, [], "not-a-number", float("nan"), float("inf")),
+)
+def test_nullable_number_rejects_malformed_non_null_values(bad_value: Any) -> None:
+    with pytest.raises(RuntimeError, match="Malformed job schedule event number"):
+        employee._required_nullable_number(bad_value, "job schedule event")
+
+
+@pytest.mark.parametrize(
     "value",
     (
         "2026-08-22",
@@ -500,6 +509,59 @@ def test_provider_utc_timestamp_normalizes_explicit_offset_to_z() -> None:
 def test_general_timestamp_parser_still_rejects_naive_values() -> None:
     with pytest.raises(RuntimeError, match="Malformed schedule timestamp"):
         employee._required_timestamp("2026-08-22T12:00:00", "schedule timestamp")
+
+
+def test_labor_hours_zero_job_id_selects_all_active_jobs(
+    active_jobs: list[dict[str, Any]],
+) -> None:
+    result = employee._build_labor_hours_variance(
+        [],
+        active_jobs_by_id=employee._active_jobs_by_id(active_jobs),
+        job_id=0,
+        only_over_estimate=False,
+        limit=50,
+    )
+
+    assert result["jobs"] == []
+    assert result["returned"] == 0
+    assert result["mode"] == "read_only"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_job_id",
+    (False, True, 0.0, 1.0, "0", "101", -1, "1/../../customers"),
+)
+async def test_registered_labor_tool_rejects_coercive_job_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_job_id: Any,
+) -> None:
+    requested: list[str] = []
+
+    async def fake_active_rows() -> list[dict[str, Any]]:
+        requested.append("active_jobs")
+        return []
+
+    async def fake_get(path: str) -> list[dict[str, Any]]:
+        requested.append(path)
+        return []
+
+    monkeypatch.setattr(employee, "_active_job_rows", fake_active_rows)
+    monkeypatch.setattr(employee, "_employee_get", fake_get)
+
+    with pytest.raises(Exception):
+        await employee.mcp._tool_manager.call_tool(
+            "synkedup_labor_hours_variance",
+            {
+                "start_date": "2026-06-01",
+                "end_date": "2026-08-21",
+                "job_id": bad_job_id,
+                "only_over_estimate": False,
+                "limit": 10,
+            },
+        )
+
+    assert requested == []
 
 
 def test_validate_job_id_rejects_non_numeric_and_non_positive_values() -> None:

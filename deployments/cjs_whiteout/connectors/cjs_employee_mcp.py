@@ -11,9 +11,10 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 
 DEFAULT_CORE_PATH = Path("/opt/cjs-whiteout/connectors/cjs_assets_mcp.py")
@@ -21,6 +22,7 @@ API_VERSION = "1.1.60"
 MAX_QUERY_LENGTH = 100
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 mcp = FastMCP("CJS Employee Project Data")
+StrictNonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 
 
 def _required_number(value: Any, label: str) -> float:
@@ -333,7 +335,11 @@ def _build_labor_hours_variance(
     only_over_estimate: bool,
     limit: int,
 ) -> dict[str, Any]:
-    requested_job_id = _validated_job_id(job_id) if job_id is not None else None
+    requested_job_id = (
+        None
+        if job_id is None or (type(job_id) is int and job_id == 0)
+        else _validated_job_id(job_id)
+    )
     jobs: dict[int, dict[str, Any]] = {}
     for source in _require_dict_rows(source_rows, "labor report"):
         project_id = _backend_id(source.get("projectId"))
@@ -812,13 +818,14 @@ async def synkedup_schedule(
 async def synkedup_labor_hours_variance(
     start_date: str,
     end_date: str,
-    job_id: int | None = None,
+    job_id: StrictNonNegativeInt = 0,
     only_over_estimate: bool = False,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Return estimated versus actual labor hours for active jobs.
 
-    This tool intentionally omits labor cost, materials cost, equipment cost,
+    Pass job_id=0 to include all active jobs. This tool intentionally omits
+    labor cost, materials cost, equipment cost,
     subcontractor cost, pricing, margins, payroll, and QuickBooks data.
     """
     start, end = _validated_dates(start_date, end_date)
