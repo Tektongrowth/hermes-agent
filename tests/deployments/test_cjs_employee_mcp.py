@@ -369,6 +369,42 @@ def test_schedule_treats_null_crew_members_as_unassigned(
     _assert_no_forbidden_keys(result)
 
 
+def test_schedule_normalizes_provider_naive_utc_timestamps(
+    active_jobs: list[dict[str, Any]],
+) -> None:
+    event = {
+        "id": 7001,
+        "jobId": 101,
+        "jobName": "Front Walk",
+        "jobNumber": "26-101",
+        "customer": {"id": 5001, "displayName": "Alice Example"},
+        "property": {
+            "address1": "10 Main St",
+            "address2": "",
+            "city": "Exampleville",
+            "state": "PA",
+            "zip": "19000",
+        },
+        "startUtc": "2026-08-22T12:00:00",
+        "endUtc": "2026-08-22T20:00:00",
+        "allDay": False,
+        "crewMemberIds": None,
+        "workAreas": [],
+    }
+
+    result = employee._build_schedule(
+        {"events": [event]},
+        active_jobs_by_id=employee._active_jobs_by_id(active_jobs),
+        query="Alice",
+        limit=50,
+    )
+
+    output = result["events"][0]
+    assert output["start_utc"] == "2026-08-22T12:00:00Z"
+    assert output["end_utc"] == "2026-08-22T20:00:00Z"
+    _assert_no_forbidden_keys(result)
+
+
 @pytest.mark.parametrize(
     "bad_value",
     ([{}], [True], [0], [-1], ["01"], [1, 1], {}, "1"),
@@ -1199,7 +1235,7 @@ def test_employee_outputs_remove_all_unrestricted_notes(
         {"workAreas": {}},
         {"workAreas": ["not-a-work-area"]},
         {"startUtc": "not-a-timestamp"},
-        {"endUtc": "2026-08-22T20:00:00"},
+        {"endUtc": "2026-08-22 20:00:00"},
         {"workAreas": [{"name": "Paver Walk", "status": "Open", "estimatedHours": True}]},
     ],
 )

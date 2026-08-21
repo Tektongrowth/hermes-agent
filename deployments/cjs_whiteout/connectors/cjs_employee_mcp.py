@@ -472,8 +472,12 @@ def _build_schedule(
         for key, expected in canonical_address.items():
             _require_identity_match(property_data, key, expected, "schedule event")
 
-        start_utc, start = _required_timestamp(source.get("startUtc"), "schedule event timestamp")
-        end_utc, end = _required_timestamp(source.get("endUtc"), "schedule event timestamp")
+        start_utc, start = _required_provider_utc_timestamp(
+            source.get("startUtc"), "schedule event timestamp"
+        )
+        end_utc, end = _required_provider_utc_timestamp(
+            source.get("endUtc"), "schedule event timestamp"
+        )
         if end < start:
             raise RuntimeError("Malformed schedule event timestamp")
         all_day = _required_bool(source.get("allDay"), "schedule event all-day flag")
