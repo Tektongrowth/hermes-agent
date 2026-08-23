@@ -316,6 +316,8 @@ discord:
   history_backfill: true          # Prepend recent channel scrollback on mention (default: true)
   history_backfill_limit: 50      # Max messages to scan backwards (default: 50)
   channel_prompts: {}             # Per-channel ephemeral system prompts
+  mention_aliases:                # Local aliases for outbound real-user mentions
+    owner: "123456789012345678"
   allow_mentions:                 # What the bot is allowed to ping (safe defaults)
     everyone: false               # @everyone / @here pings (default: false)
     roles: false                  # @role pings (default: false)
@@ -442,6 +444,20 @@ Behavior:
 - Exact thread/channel ID matches win.
 - If a message arrives inside a thread or forum post and that thread has no explicit entry, Hermes falls back to the parent channel/forum ID.
 - Prompts are applied ephemerally at runtime, so changing them affects future turns immediately without rewriting past session history.
+
+#### `discord.mention_aliases`
+
+Type: mapping. Default: `{}`.
+
+Maps a local alias to a Discord user ID for outbound notifications sent through the standalone gateway path.
+
+```yaml
+discord:
+  mention_aliases:
+    owner: "123456789012345678"
+```
+
+Use the alias in message text as `{{mention:owner}}`. Hermes converts it to a real Discord user mention before posting. Unknown aliases and malformed user IDs fail closed instead of sending text that looks like a mention but does not notify anyone. Keep account-specific IDs in local configuration, not prompts or repository files.
 
 #### `discord.history_backfill`
 

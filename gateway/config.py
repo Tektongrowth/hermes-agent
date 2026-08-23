@@ -868,6 +868,12 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
                     else:
                         bridged["channel_prompts"] = channel_prompts
+                if plat == Platform.DISCORD and "mention_aliases" in platform_cfg:
+                    mention_aliases = platform_cfg["mention_aliases"]
+                    if isinstance(mention_aliases, dict):
+                        bridged["mention_aliases"] = {str(k): v for k, v in mention_aliases.items()}
+                    else:
+                        bridged["mention_aliases"] = mention_aliases
                 if "gateway_restart_notification" in platform_cfg:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
                 enabled_was_explicit = "enabled" in platform_cfg

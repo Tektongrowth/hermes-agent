@@ -135,6 +135,36 @@ def check_discord_requirements() -> bool:
     return True
 
 
+_OUTBOUND_MENTION_ALIAS_RE = re.compile(r"\{\{mention:\s*([A-Za-z0-9_-]{1,64})\s*\}\}")
+_DISCORD_SNOWFLAKE_RE = re.compile(r"^\d{15,22}$")
+
+
+def _expand_outbound_mention_aliases(message: str, aliases: Dict[str, Any]) -> str:
+    """Expand configured ``{{mention:name}}`` tokens into Discord user mentions.
+
+    Alias values stay in local configuration instead of model-visible prompts, so
+    outbound tools can request a real ping without emitting immutable user IDs.
+    Unknown aliases and malformed IDs fail closed rather than sending a message
+    that only looks like a mention.
+    """
+    normalized = {
+        str(name).strip().lower(): str(user_id).strip()
+        for name, user_id in (aliases or {}).items()
+        if str(name).strip()
+    }
+
+    def _replace(match: re.Match) -> str:
+        alias = match.group(1).lower()
+        if alias not in normalized:
+            raise ValueError(f"unknown Discord mention alias: {alias}")
+        user_id = normalized[alias]
+        if not _DISCORD_SNOWFLAKE_RE.fullmatch(user_id):
+            raise ValueError(f"invalid Discord user ID for mention alias: {alias}")
+        return "<@" + user_id + ">"
+
+    return _OUTBOUND_MENTION_ALIAS_RE.sub(_replace, message)
+
+
 def _build_allowed_mentions():
     """Build Discord ``AllowedMentions`` with safe defaults, overridable via env.
 
@@ -5820,6 +5850,12 @@ async def _standalone_send(
     ``force_document`` is accepted for signature parity but unused — Discord
     treats every uploaded file as a generic attachment.
     """
+    try:
+        aliases = (getattr(pconfig, "extra", None) or {}).get("mention_aliases", {})
+        message = _expand_outbound_mention_aliases(message, aliases)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
     try:
         import aiohttp
     except ImportError:
