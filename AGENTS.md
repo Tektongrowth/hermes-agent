@@ -1170,3 +1170,11 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+<!-- TEKTON_ACTIVE_BRANCH_GUARD_START -->
+## Active branch continuity lock
+
+Before any repository action, read `.cutover/active-branch`, run `git fetch origin --prune`, and run `scripts/verify-active-branch.sh`. Recover the existing locked branch instead of creating a replacement branch when prior context is unclear.
+
+The configured hooks prevent new branch refs, branch deletion, commits outside the lock, rebases, wrong-branch pushes, non-fast-forward pushes, and unapproved default-branch pushes. Switching to an existing branch or detached HEAD is detected only after checkout; return to the locked branch before any further action. Reset, cherry-pick, and merge on the locked branch are policy-gated but are not fully enforceable by standard Git hooks, so record exact approval from `nick` with a durable reference before using them. Run `scripts/setup-git-hooks.sh` after every new clone. Tracked hooks protect configured checkouts only and do not replace GitHub server-side branch protection.
+<!-- TEKTON_ACTIVE_BRANCH_GUARD_END -->

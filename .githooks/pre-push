@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$HOOK_DIR/lib/active-branch-guard.sh"
+require_active_branch "push"
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/main" || "$remote_ref" == "refs/heads/master" ]]; then
+    if [[ "${TEKTON_MAIN_PUSH_APPROVED_BY:-}" != "$REQUIRED_APPROVER" ]] \
+      || [[ -z "${TEKTON_MAIN_APPROVAL_REF:-}" ]]; then
+      echo "Blocked: direct default-branch push requires exact approval from $REQUIRED_APPROVER for this batch." >&2
+      exit 1
+    fi
+  else
+    require_ref_allowed "$remote_ref" "push"
+  fi
+
+  if [[ "$local_sha" == "$zero" ]]; then
+    if ! context_change_is_approved; then
+      echo "Blocked: remote branch deletion requires exact branch-context approval." >&2
+      exit 1
+    fi
+    continue
+  fi
+
+  if [[ "$remote_sha" != "$zero" ]] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    if [[ "${TEKTON_HISTORY_REWRITE_APPROVED_BY:-}" != "$REQUIRED_APPROVER" ]] \
+      || [[ -z "${TEKTON_HISTORY_REWRITE_APPROVAL_REF:-}" ]]; then
+      echo "Blocked: non-fast-forward push requires exact history-rewrite approval." >&2
+      exit 1
+    fi
+  fi
+done

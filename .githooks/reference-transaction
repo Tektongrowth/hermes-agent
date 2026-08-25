@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$HOOK_DIR/lib/active-branch-guard.sh"
+[[ "${1:-}" == "prepared" ]] || exit 0
+zero=0000000000000000000000000000000000000000
+while read -r old_sha new_sha ref_name; do
+  [[ "$ref_name" == refs/heads/* ]] || continue
+  require_ref_allowed "$ref_name" "local branch reference update"
+  if [[ "$ref_name" == "refs/heads/$ACTIVE_BRANCH" && "$new_sha" == "$zero" ]] && ! context_change_is_approved; then
+    echo "Blocked: deleting locked branch '$ACTIVE_BRANCH' requires exact approval from $REQUIRED_APPROVER." >&2
+    exit 1
+  fi
+done

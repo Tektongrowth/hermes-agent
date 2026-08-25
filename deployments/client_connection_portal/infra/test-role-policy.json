@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TestPortalStateOnly",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-west-2:689556676341:table/tekton-client-connection-portal-test"
+    },
+    {
+      "Sid": "ReadTestSigningKeyOnly",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-west-2:689556676341:parameter/tekton/portal/test/signing-key"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$HOOK_DIR/lib/active-branch-guard.sh"
+require_active_branch "rebase"
+if [[ "${TEKTON_HISTORY_REWRITE_APPROVED_BY:-}" != "$REQUIRED_APPROVER" ]] \
+  || [[ -z "${TEKTON_HISTORY_REWRITE_APPROVAL_REF:-}" ]]; then
+  echo "Blocked: rebase requires exact approval from $REQUIRED_APPROVER and a durable approval reference." >&2
+  exit 1
+fi
