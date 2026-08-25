@@ -125,12 +125,13 @@ def adapter(monkeypatch):
     return adapter
 
 
-def make_message(*, channel, content: str, mentions=None, msg_type=None):
+def make_message(*, channel, content: str, mentions=None, role_mentions=None, msg_type=None):
     author = SimpleNamespace(id=42, display_name="Jezza", name="Jezza")
     return SimpleNamespace(
         id=123,
         content=content,
         mentions=list(mentions or []),
+        role_mentions=list(role_mentions or []),
         attachments=[],
         reference=None,
         created_at=datetime.now(timezone.utc),
@@ -345,6 +346,56 @@ async def test_discord_accepts_and_strips_bot_mentions_when_required(adapter, mo
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "hello with mention"
+
+
+@pytest.mark.asyncio
+async def test_discord_accepts_and_strips_its_managed_bot_role_mention_when_required(
+    adapter, monkeypatch
+):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+    bot_role = SimpleNamespace(id=777, managed=True)
+    guild = SimpleNamespace(id=1234, name="Hermes Server", me=SimpleNamespace(roles=[bot_role]))
+    channel = FakeTextChannel(channel_id=321)
+    channel.guild = guild
+    message = make_message(
+        channel=channel,
+        content=f"<@&{bot_role.id}> are the plants ordered?",
+        role_mentions=[bot_role],
+    )
+    message.guild = guild
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "are the plants ordered?"
+
+
+@pytest.mark.asyncio
+async def test_discord_does_not_accept_unrelated_role_mention_when_required(
+    adapter, monkeypatch
+):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+    bot_role = SimpleNamespace(id=777, managed=True)
+    unrelated_role = SimpleNamespace(id=888, managed=False)
+    guild = SimpleNamespace(name="Hermes Server", me=SimpleNamespace(roles=[bot_role]))
+    channel = FakeTextChannel(channel_id=321)
+    channel.guild = guild
+    message = make_message(
+        channel=channel,
+        content=f"<@&{unrelated_role.id}> hello office",
+        role_mentions=[unrelated_role],
+    )
+    message.guild = guild
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,35 @@ def _principal_role_ids(member: Any) -> Tuple[str, ...]:
         return ()
 
 
+def _bot_mention_role_ids(message: Any, bot_user: Any) -> Tuple[str, ...]:
+    """Return managed role IDs assigned to this bot and mentioned in a message."""
+    guild = getattr(message, "guild", None) or getattr(
+        getattr(message, "channel", None), "guild", None
+    )
+    bot_member = getattr(guild, "me", None)
+    assigned_managed_role_ids = {
+        str(role.id)
+        for role in (getattr(bot_member, "roles", ()) or ())
+        if getattr(role, "managed", False) and getattr(role, "id", None) is not None
+    }
+    if not assigned_managed_role_ids:
+        return ()
+    return tuple(
+        str(role.id)
+        for role in (getattr(message, "role_mentions", ()) or ())
+        if getattr(role, "id", None) is not None
+        and str(role.id) in assigned_managed_role_ids
+    )
+
+
+def _message_mentions_bot(message: Any, bot_user: Any) -> bool:
+    if bot_user is None:
+        return False
+    if bot_user in (getattr(message, "mentions", ()) or ()):
+        return True
+    return bool(_bot_mention_role_ids(message, bot_user))
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available.
 
@@ -4622,10 +4651,12 @@ class DiscordAdapter(BasePlatformAdapter):
             if snapshot_text_parts and not raw_content:
                 raw_content = "\n".join(snapshot_text_parts)
                 normalized_content = raw_content
-        if self._client.user and self._client.user in message.mentions:
+        if _message_mentions_bot(message, self._client.user):
             mention_prefix = True
             normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
             normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
+            for role_id in _bot_mention_role_ids(message, self._client.user):
+                normalized_content = normalized_content.replace(f"<@&{role_id}>", "").strip()
             message.content = normalized_content
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
