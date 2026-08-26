@@ -234,6 +234,14 @@ class PortalApp:
                         '<label>Username<input name="username" autocomplete="off"></label>'
                         '<label>Password<input name="password" type="password" autocomplete="new-password"></label>'
                     )
+                elif slot.provider is ProviderKind.MICROSOFT:
+                    expected = record.get("expected_identities", {}).get(slot_id, "")
+                    fields = (
+                        '<label>Outlook email address'
+                        f'<input name="connected_email" type="email" autocomplete="email" value="{html.escape(str(expected))}"></label>'
+                        '<p class="security-note">Your password stays with Microsoft. '
+                        'You will enter it only on Microsoft’s official sign-in page when the live connection is enabled.</p>'
+                    )
                 else:
                     expected = record.get("expected_identities", {}).get(slot_id, "")
                     fields = (
@@ -446,7 +454,7 @@ def _message_page(message: str) -> str:
 _CSS = """
 :root{color-scheme:dark;--ink:#edf7f5;--muted:#9cb4af;--panel:#12231f;--line:#28453d;--green:#84e1bc;--amber:#f1b75b}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 85% 5%,#21473d 0,transparent 32%),#07110f;color:var(--ink);font:16px/1.55 Georgia,serif}
-main{width:min(1040px,calc(100% - 32px));margin:auto;padding:64px 0 36px}header{max-width:760px;margin-bottom:34px}.kicker,.eyebrow{color:var(--green);font:700 12px/1.2 ui-monospace,monospace;letter-spacing:.15em;text-transform:uppercase}h1,h2{font-family:Georgia,serif;line-height:1.04;margin:.25em 0}h1{font-size:clamp(40px,8vw,78px);letter-spacing:-.045em}h2{font-size:26px}.intro{max-width:670px;color:var(--muted);font-size:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{display:grid;gap:22px;padding:24px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,rgba(20,43,37,.95),rgba(12,27,23,.92));box-shadow:0 20px 60px rgba(0,0,0,.18)}.status{color:var(--amber);font-weight:700}.card small{display:block;color:var(--muted);overflow-wrap:anywhere}form{display:grid;gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:14px}input{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;background:#081713;color:var(--ink);padding:10px 12px;font:inherit}button{min-height:46px;border:0;border-radius:999px;background:var(--green);color:#06110e;padding:10px 20px;font:800 14px ui-monospace,monospace;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.35}.complete{margin:28px 0;max-width:280px}footer{border-top:1px solid var(--line);padding-top:22px;color:var(--muted);font-size:13px}.message{max-width:680px;padding:30px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
+main{width:min(1040px,calc(100% - 32px));margin:auto;padding:64px 0 36px}header{max-width:760px;margin-bottom:34px}.kicker,.eyebrow{color:var(--green);font:700 12px/1.2 ui-monospace,monospace;letter-spacing:.15em;text-transform:uppercase}h1,h2{font-family:Georgia,serif;line-height:1.04;margin:.25em 0}h1{font-size:clamp(40px,8vw,78px);letter-spacing:-.045em}h2{font-size:26px}.intro{max-width:670px;color:var(--muted);font-size:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{display:grid;gap:22px;padding:24px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,rgba(20,43,37,.95),rgba(12,27,23,.92));box-shadow:0 20px 60px rgba(0,0,0,.18)}.status{color:var(--amber);font-weight:700}.card small{display:block;color:var(--muted);overflow-wrap:anywhere}form{display:grid;gap:12px}label{display:grid;gap:6px;color:var(--muted);font-size:14px}.security-note{margin:0;color:var(--muted);font-size:13px;line-height:1.45}input{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;background:#081713;color:var(--ink);padding:10px 12px;font:inherit}button{min-height:46px;border:0;border-radius:999px;background:var(--green);color:#06110e;padding:10px 20px;font:800 14px ui-monospace,monospace;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.35}.complete{margin:28px 0;max-width:280px}footer{border-top:1px solid var(--line);padding-top:22px;color:var(--muted);font-size:13px}.message{max-width:680px;padding:30px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
 @media(max-width:700px){main{width:min(100% - 24px,520px);padding-top:38px}.grid{grid-template-columns:1fr}.card{padding:20px}h1{font-size:clamp(38px,15vw,58px)}.complete{max-width:none}.complete button{width:100%}}
 """
 

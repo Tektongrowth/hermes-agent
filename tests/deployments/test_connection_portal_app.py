@@ -314,3 +314,18 @@ def test_expired_invitation_and_session_are_rejected(
 
     assert app.handle(Request(method="GET", path=f"/s/{token}")).status == 410
     assert _setup(app, cookie).status == 410
+
+
+def test_outlook_card_collects_email_only_and_keeps_password_on_microsoft(
+    app: PortalApp,
+) -> None:
+    _, cookie = _claim(app, slots=["microsoft-primary"])
+
+    response = _setup(app, cookie)
+
+    assert response.status == 200
+    assert "Outlook / Microsoft 365 email" in response.body
+    assert 'name="connected_email"' in response.body
+    assert "Outlook email address" in response.body
+    assert "Microsoft’s official sign-in page" in response.body
+    assert 'name="password"' not in response.body

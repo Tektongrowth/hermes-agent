@@ -97,7 +97,7 @@ _CJS_SLOTS: Mapping[str, ConnectorSlot] = MappingProxyType(
         ),
         "microsoft-primary": ConnectorSlot(
             slot_id="microsoft-primary",
-            label="Microsoft 365 email",
+            label="Outlook / Microsoft 365 email",
             provider=ProviderKind.MICROSOFT,
             authorization_endpoint=_MICROSOFT_AUTH,
             token_endpoint=_MICROSOFT_TOKEN,

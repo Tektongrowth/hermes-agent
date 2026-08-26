@@ -88,3 +88,24 @@ def test_admin_issuer_rejects_non_test_or_non_tls_base_urls() -> None:
             assert str(exc) == "invalid test base URL"
         else:
             raise AssertionError(f"unsafe test base URL accepted: {base_url}")
+
+
+def test_admin_issuer_binds_outlook_mailbox_identity_separately_from_recipient() -> None:
+    boto3 = FakeBoto3()
+
+    issue_test_invitation(
+        boto3_module=boto3,
+        base_url="https://abc.lambda-url.us-west-2.on.aws",
+        recipient_email="nick@example.com",
+        slots=["microsoft-primary"],
+        expected_identities={"microsoft-primary": "info@cjslandscape.com"},
+        ttl_seconds=900,
+        now=lambda: 1_700_000_000,
+        id_factory=lambda: "inv-1",
+    )
+
+    item = boto3.table.items[0]
+    assert item["recipient_email"] == "nick@example.com"
+    assert item["expected_identities"] == {
+        "microsoft-primary": "info@cjslandscape.com"
+    }

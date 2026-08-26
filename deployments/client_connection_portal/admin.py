@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +20,7 @@ def issue_test_invitation(
     base_url: str,
     recipient_email: str,
     slots: Sequence[str],
+    expected_identities: Mapping[str, str] | None = None,
     ttl_seconds: int,
     now: Callable[[], int | float],
     id_factory: Callable[[], str],
@@ -62,6 +63,7 @@ def issue_test_invitation(
         tenant_id="cjs-landscape",
         recipient_email=recipient_email,
         slots=slots,
+        expected_identities=expected_identities,
         ttl_seconds=ttl_seconds,
     )
     return f"{normalized_base_url}/s/{token}"

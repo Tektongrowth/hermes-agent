@@ -123,6 +123,16 @@ def main() -> int:
         assert len(driver.find_elements(By.CSS_SELECTOR, "section.card")) == len(SLOTS)
         assert len(driver.find_elements(By.TAG_NAME, "script")) == 0
         assert driver.execute_script("return performance.getEntriesByType('resource').length") == 0
+        outlook_card = driver.find_element(
+            By.XPATH,
+            "//section[contains(@class,'card')][.//h2[normalize-space()='Outlook / Microsoft 365 email']]",
+        )
+        assert outlook_card.find_element(By.NAME, "connected_email").get_attribute("type") == "email"
+        assert "Outlook email address" in outlook_card.text
+        assert "Microsoft’s official sign-in page" in outlook_card.text
+        assert outlook_card.find_elements(By.CSS_SELECTOR, "input[type='password']") == []
+        checks["outlook_email_field_present"] = True
+        checks["outlook_password_field_absent"] = True
         geometry = driver.execute_script(
             "return {innerWidth:innerWidth,scrollWidth:document.documentElement.scrollWidth}"
         )
@@ -139,6 +149,15 @@ def main() -> int:
         assert mobile_geometry["scrollWidth"] <= mobile_geometry["innerWidth"]
         assert " " not in mobile_geometry["columns"].strip()
         driver.save_screenshot(str(CACHE / "mobile.png"))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'})", outlook_card)
+        outlook_bounds = driver.execute_script(
+            "const r=arguments[0].getBoundingClientRect(); return {left:r.left,right:r.right,width:r.width}",
+            outlook_card,
+        )
+        assert outlook_bounds["left"] >= 0
+        assert outlook_bounds["right"] <= mobile_geometry["innerWidth"]
+        driver.save_screenshot(str(CACHE / "mobile-outlook.png"))
+        checks["mobile_outlook_card_contained"] = True
         checks["mobile_width"] = mobile_geometry["innerWidth"]
         checks["mobile_no_overflow"] = True
         checks["mobile_single_column"] = True
@@ -204,7 +223,11 @@ def main() -> int:
 
     summary = {
         "checks": checks,
-        "screenshots": [str(CACHE / "desktop.png"), str(CACHE / "mobile.png")],
+        "screenshots": [
+            str(CACHE / "desktop.png"),
+            str(CACHE / "mobile.png"),
+            str(CACHE / "mobile-outlook.png"),
+        ],
         "invitation_ttl_seconds": 1_200,
         "slots_tested": len(SLOTS),
     }
