@@ -18087,27 +18087,49 @@ class GatewayRunner:
             # A schema-time grant is not enough for long-running turns. Re-read
             # principal policy and channel scope immediately before every tool.
             from gateway.principal_toolsets import (
+                principal_action_preview,
                 principal_execution_tool_authorized,
                 principal_policy_present,
+                principal_user_action_approval_required,
             )
             from tools.registry import registry as _execution_registry
 
             _principal_policy_required = principal_policy_present(user_config, platform_key)
 
-            def _execution_tool_authorizer(tool_name: str, _tool_args: dict) -> bool:
+            def _execution_tool_authorizer(tool_name: str, tool_args: dict) -> bool | str:
                 fresh_config = _load_gateway_runtime_config()
                 if _principal_policy_required and not principal_policy_present(
                     fresh_config, platform_key
                 ):
                     return False
-                return principal_execution_tool_authorized(
+                if not principal_execution_tool_authorized(
                     fresh_config,
                     platform_key,
                     source,
                     tool_name,
                     registry=_execution_registry,
                     fallback_toolsets=enabled_toolsets,
-                )
+                ):
+                    return False
+                if principal_user_action_approval_required(
+                    fresh_config,
+                    platform_key,
+                    source,
+                    tool_name,
+                    tool_args,
+                ):
+                    from tools.approval import request_gateway_action_approval
+
+                    approved = request_gateway_action_approval(
+                        principal_action_preview(tool_name, tool_args),
+                        "A user requested an irreversible or externally consequential action.",
+                    )
+                    if not approved:
+                        return (
+                            "BLOCKED: An administrator denied this action or the approval "
+                            "prompt expired. Do not retry it unless the user makes a new request."
+                        )
+                return True
 
             agent.tool_authorization_callback = _execution_tool_authorizer
 
@@ -18312,6 +18334,15 @@ class GatewayRunner:
 
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                approval_mode = approval_data.get("approval_mode", "standard")
+                approval_kind = approval_data.get("approval_kind", "command")
+                approval_metadata = dict(_status_thread_metadata or {})
+                approval_metadata.update(
+                    {
+                        "approval_mode": approval_mode,
+                        "approval_kind": approval_kind,
+                    }
+                )
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -18324,7 +18355,7 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=approval_metadata,
                             ),
                             _loop_for_step,
                             logger=logger,
@@ -18346,19 +18377,27 @@ class GatewayRunner:
 
                 # Fallback: plain text approval prompt
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
-                )
+                if approval_mode == "confirm_only":
+                    msg = (
+                        f"Administrator confirmation required:\n"
+                        f"```\n{cmd_preview}\n```\n"
+                        f"Reason: {desc}\n\n"
+                        f"Reply `/approve` to confirm this action once or `/deny` to cancel."
+                    )
+                else:
+                    msg = (
+                        f"Dangerous command requires approval:\n"
+                        f"```\n{cmd_preview}\n```\n"
+                        f"Reason: {desc}\n\n"
+                        f"Reply `/approve` to execute, `/approve session` to approve this pattern "
+                        f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                    )
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
-                            metadata=_status_thread_metadata,
+                            metadata=approval_metadata,
                         ),
                         _loop_for_step,
                         logger=logger,

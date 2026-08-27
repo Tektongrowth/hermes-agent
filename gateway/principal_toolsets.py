@@ -2,7 +2,33 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Optional
+
+
+_SENSITIVE_ARGUMENT_TERMS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+_ACTION_SELECTOR_KEYS = frozenset(
+    {
+        "action",
+        "endpoint",
+        "http_method",
+        "method",
+        "operation",
+        "tool",
+        "tool_name",
+        "tool_slug",
+    }
+)
 
 
 def _normalize_toolsets(value: Any) -> Optional[list[str]]:
@@ -14,6 +40,30 @@ def _normalize_toolsets(value: Any) -> Optional[list[str]]:
     return sorted(set(value))
 
 
+def _normalize_action_policy(value: Any) -> Optional[dict[str, Any]]:
+    """Validate the optional per-platform action approval policy."""
+    if not isinstance(value, dict):
+        return None
+    allowed_keys = {"irreversible_requires_admin_approval", "tool_name_patterns"}
+    if any(not isinstance(key, str) or key not in allowed_keys for key in value):
+        return None
+    enabled = value.get("irreversible_requires_admin_approval", False)
+    if not isinstance(enabled, bool):
+        return None
+    patterns = value.get("tool_name_patterns", [])
+    if not isinstance(patterns, list) or any(not isinstance(pattern, str) for pattern in patterns):
+        return None
+    try:
+        for pattern in patterns:
+            re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return None
+    return {
+        "irreversible_requires_admin_approval": enabled,
+        "tool_name_patterns": list(patterns),
+    }
+
+
 def _valid_platform_policy(policy: Any) -> bool:
     """Validate a complete platform policy before granting any capability.
 
@@ -23,7 +73,14 @@ def _valid_platform_policy(policy: Any) -> bool:
     """
     if not isinstance(policy, dict):
         return False
-    allowed_keys = {"default", "users", "roles", "guilds", "admin_users"}
+    allowed_keys = {
+        "default",
+        "users",
+        "roles",
+        "guilds",
+        "admin_users",
+        "user_action_policy",
+    }
     if any(not isinstance(key, str) or key not in allowed_keys for key in policy):
         return False
     if "default" in policy and _normalize_toolsets(policy["default"]) is None:
@@ -36,6 +93,10 @@ def _valid_platform_policy(policy: Any) -> bool:
         admins = policy["admin_users"]
         if not isinstance(admins, list) or any(not isinstance(user, str) for user in admins):
             return False
+    if "user_action_policy" in policy and _normalize_action_policy(
+        policy["user_action_policy"]
+    ) is None:
+        return False
     for mapping_name in ("users", "roles"):
         if mapping_name not in policy:
             continue
@@ -167,7 +228,7 @@ def resolve_principal_toolsets(
         configured_default = _normalize_toolsets(policy["default"])
         if configured_default is None:
             return []
-        default = configured_default
+        default = fallback if "*" in configured_default else configured_default
 
     user_id = getattr(source, "user_id", None)
     users = policy.get("users", {})
@@ -179,7 +240,9 @@ def resolve_principal_toolsets(
 
     if user_id is not None and user_id in users:
         user_toolsets = _normalize_toolsets(users[user_id])
-        return [] if user_toolsets is None else user_toolsets
+        if user_toolsets is None:
+            return []
+        return fallback if "*" in user_toolsets else user_toolsets
 
     source_roles = getattr(source, "principal_role_ids", ()) or ()
     if isinstance(source_roles, (str, bytes)):
@@ -197,6 +260,8 @@ def resolve_principal_toolsets(
         role_toolsets = _normalize_toolsets(roles[role_id])
         if role_toolsets is None:
             return []
+        if "*" in role_toolsets:
+            role_toolsets = fallback
         matched_toolsets.add(tuple(role_toolsets))
 
     if len(matched_toolsets) == 1:
@@ -207,6 +272,87 @@ def resolve_principal_toolsets(
         # toolset set or use an exact-user override.
         return []
     return default
+
+
+def _action_policy_for_platform(user_config: Any, platform_key: str) -> Optional[dict[str, Any]]:
+    """Return a validated action policy, or None when absent or invalid."""
+    if not isinstance(user_config, dict):
+        return None
+    policies = user_config.get("platform_principal_toolsets")
+    platform_name = str(getattr(platform_key, "value", platform_key))
+    policy = policies.get(platform_name) if isinstance(policies, dict) else None
+    if not isinstance(policy, dict) or not _valid_platform_policy(policy):
+        return None
+    if "user_action_policy" not in policy:
+        return None
+    return _normalize_action_policy(policy["user_action_policy"])
+
+
+def _action_candidates(tool_name: str, tool_args: Any) -> list[str]:
+    """Extract operation identifiers without scanning arbitrary user content."""
+    candidates = [str(tool_name or "")]
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key in _ACTION_SELECTOR_KEYS and isinstance(
+                    child, (str, int, float)
+                ):
+                    candidates.append(str(child))
+                elif isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                if isinstance(child, (dict, list)):
+                    visit(child)
+
+    visit(tool_args)
+    return candidates
+
+
+def principal_user_action_approval_required(
+    user_config: Any,
+    platform_key: str,
+    source: Any,
+    tool_name: str,
+    tool_args: Any,
+) -> bool:
+    """Return whether a non-admin tool action needs one-time admin approval."""
+    if principal_admin_authorized(user_config, platform_key, source):
+        return False
+    action_policy = _action_policy_for_platform(user_config, platform_key)
+    if not action_policy or not action_policy["irreversible_requires_admin_approval"]:
+        return False
+    candidates = _action_candidates(tool_name, tool_args)
+    return any(
+        re.search(pattern, candidate, re.IGNORECASE)
+        for pattern in action_policy["tool_name_patterns"]
+        for candidate in candidates
+    )
+
+
+def principal_action_preview(tool_name: str, tool_args: Any, max_chars: int = 1800) -> str:
+    """Build a credential-safe Discord preview for an action approval prompt."""
+    def scrub(value: Any, parent_key: str = "") -> Any:
+        if any(term in parent_key.lower() for term in _SENSITIVE_ARGUMENT_TERMS):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {str(key): scrub(child, str(key)) for key, child in value.items()}
+        if isinstance(value, list):
+            return [scrub(child, parent_key) for child in value[:20]]
+        if isinstance(value, str):
+            return value if len(value) <= 300 else value[:297] + "..."
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return str(value)[:300]
+
+    try:
+        args_text = json.dumps(scrub(tool_args), indent=2, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        args_text = "[arguments unavailable]"
+    preview = f"Tool: {tool_name}\nArguments:\n{args_text}"
+    return preview if len(preview) <= max_chars else preview[: max_chars - 3] + "..."
 
 
 def _configured_channel_ids(user_config: Any, platform_key: str) -> Optional[set[str]]:

@@ -4205,8 +4205,14 @@ class DiscordAdapter(BasePlatformAdapter):
             # Discord embed description limit is 4096; show full command up to that
             max_desc = 4088
             cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
+            approval_mode = str((metadata or {}).get("approval_mode", "standard"))
+            confirm_only = approval_mode == "confirm_only"
             embed = discord.Embed(
-                title="⚠️ Command Approval Required",
+                title=(
+                    "Administrator Confirmation Required"
+                    if confirm_only
+                    else "Command Approval Required"
+                ),
                 description=f"```\n{cmd_display}\n```",
                 color=discord.Color.orange(),
             )
@@ -4217,6 +4223,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_user_ids=self._approval_allowed_user_ids,
                 allowed_role_ids=self._approval_allowed_role_ids,
                 fail_closed=self._approval_fail_closed,
+                confirm_only=confirm_only,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5208,13 +5215,24 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
             fail_closed: bool = False,
+            confirm_only: bool = False,
         ):
             super().__init__(timeout=300)  # 5-minute timeout
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.fail_closed = fail_closed
+            self.confirm_only = confirm_only
             self.resolved = False
+            if self.confirm_only:
+                for child in list(self.children):
+                    label = str(getattr(child, "label", ""))
+                    if label in {"Allow Session", "Always Allow"}:
+                        self.remove_item(child)
+                    elif label == "Allow Once":
+                        child.label = "Confirm"
+                    elif label == "Deny":
+                        child.label = "Cancel"
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             """Verify the user clicking is authorized."""
@@ -5236,7 +5254,12 @@ def _define_discord_view_classes() -> None:
 
             if not self._check_auth(interaction):
                 await interaction.response.send_message(
-                    "You're not authorized to approve commands~", ephemeral=True
+                    (
+                        "Only a configured administrator can confirm this action."
+                        if self.confirm_only
+                        else "You're not authorized to approve commands."
+                    ),
+                    ephemeral=True,
                 )
                 return
 
@@ -5269,7 +5292,8 @@ def _define_discord_view_classes() -> None:
         async def allow_once(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+            label = "Confirmed" if self.confirm_only else "Approved once"
+            await self._resolve(interaction, "once", discord.Color.green(), label)
 
         @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
         async def allow_session(
@@ -5287,7 +5311,8 @@ def _define_discord_view_classes() -> None:
         async def deny(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "deny", discord.Color.red(), "Denied")
+            label = "Cancelled" if self.confirm_only else "Denied"
+            await self._resolve(interaction, "deny", discord.Color.red(), label)
 
         async def on_timeout(self):
             """Handle view timeout -- disable buttons and mark as expired."""

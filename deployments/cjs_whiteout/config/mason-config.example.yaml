@@ -53,12 +53,42 @@ platform_principal_toolsets:
     - '1539070491942453268'
     admin_users:
     - '1412944834372829245'
-    default: []
+    - '1541580058152665199'
+    default: &approved-toolsets
+    - '*'
     users:
-      '1412944834372829245': *id001
-      '1541580058152665199': *id001
+      '1412944834372829245': *approved-toolsets
+      '1541580058152665199': *approved-toolsets
     roles: {}
+    user_action_policy:
+      irreversible_requires_admin_approval: true
+      tool_name_patterns:
+      - '(?:^|_)(?:delete|remove|trash|purge|destroy|void|refund|cancel|revoke|terminate|close|disconnect)(?:_|$)'
+      - '(?:^|_)(?:send|publish|post|submit|pay|charge|transfer|share|grant|permission|invite|public_link|move)(?:_|$)'
+      - '(?:^|_)(?:launch|trigger|execute_workflow|add_contact_to_workflow)(?:_|$)'
 mcp_servers:
+  cjs-composio:
+    command: /home/nick/.hermes/hermes-agent/venv/bin/python
+    args:
+    - /opt/cjs-whiteout/current/deployments/cjs_whiteout/connectors/cjs_composio_mcp.py
+    timeout: 90
+    connect_timeout: 20
+    supports_parallel_tool_calls: false
+    env:
+      CJS_COMPOSIO_BIN: /home/nick/.local/bin/composio
+      CJS_COMPOSIO_TOOLKITS: googledrive
+      CJS_COMPOSIO_TOOL_PREFIXES: GOOGLEDRIVE
+      CJS_COMPOSIO_ACCOUNT: REPLACE_WITH_ACTIVE_CJS_GOOGLEDRIVE_ACCOUNT
+      CJS_COMPOSIO_AUDIT_PATH: /var/lib/cjs-whiteout/hermes/logs/composio-audit.jsonl
+    tools:
+      resources: false
+      prompts: false
+      toolsets:
+        composio-approved:
+        - composio_connection_status
+        - composio_search
+        - composio_tool_schema
+        - composio_execute
   cjs-synkedup:
     url: http://127.0.0.1:9342/mcp
     timeout: 60

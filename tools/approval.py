@@ -1219,6 +1219,38 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     return {"resolved": resolved, "choice": choice}
 
 
+def request_gateway_action_approval(action_preview: str, description: str) -> bool:
+    """Request one-time administrator approval for a non-terminal tool action.
+
+    This is intentionally stricter than command-pattern approvals: only an
+    explicit ``once`` decision succeeds. Session and permanent choices are not
+    accepted for irreversible business actions.
+    """
+    session_key = get_current_session_key(default="")
+    if not session_key or not _is_gateway_approval_context():
+        return False
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+    if notify_cb is None:
+        return False
+
+    approval_data = {
+        "command": str(action_preview or "")[:4000],
+        "description": str(description or "administrator approval required")[:1000],
+        "pattern_key": "user-initiated-irreversible-action",
+        "pattern_keys": ["user-initiated-irreversible-action"],
+        "approval_kind": "business_action",
+        "approval_mode": "confirm_only",
+    }
+    decision = _await_gateway_decision(
+        session_key,
+        notify_cb,
+        approval_data,
+        surface="gateway_business_action",
+    )
+    return bool(decision.get("resolved") and decision.get("choice") == "once")
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.

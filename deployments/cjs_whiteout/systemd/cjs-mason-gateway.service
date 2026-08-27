@@ -13,6 +13,7 @@ SupplementaryGroups=cjs-synkedup
 WorkingDirectory=/opt/cjs-whiteout/current
 Environment=HOME=/home/nick
 Environment=HERMES_HOME=/var/lib/cjs-whiteout/hermes
+Environment=XDG_STATE_HOME=/var/lib/cjs-whiteout/hermes/state
 Environment=PATH=/home/nick/.hermes/hermes-agent/venv/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/opt/cjs-whiteout/bin/run-mason-gateway
 Restart=always

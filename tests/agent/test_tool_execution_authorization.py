@@ -48,6 +48,13 @@ def test_authorized_tool_reaches_the_normal_dispatcher():
     dispatch.assert_called_once()
 
 
+def test_execution_authorizer_can_return_a_specific_block_message():
+    agent = _agent(lambda name, args: "BLOCKED: Administrator denied this action.")
+    with patch("run_agent.handle_function_call", side_effect=AssertionError("must not execute")):
+        result = agent._invoke_tool("mcp_cjs_synkedup_jobs", {}, "task")
+    assert json.loads(result) == {"error": "BLOCKED: Administrator denied this action."}
+
+
 def test_sequential_dispatch_path_contains_the_same_execution_gate():
     source = Path("agent/tool_executor.py").read_text(encoding="utf-8")
     assert "execution_authorization_block_message" in source

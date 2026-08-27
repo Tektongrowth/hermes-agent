@@ -53,6 +53,7 @@ install -d -m 0755 -o root -g root /opt/cjs-whiteout /opt/cjs-whiteout/releases 
 install -d -m 0750 -o cjs-synkedup -g cjs-synkedup /var/lib/cjs-synkedup /var/lib/cjs-synkedup/chrome
 install -d -m 0770 -o cjs-synkedup -g cjs-synkedup /var/log/cjs-synkedup
 install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout /var/lib/cjs-whiteout/hermes
+install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout/hermes/state /var/lib/cjs-whiteout/hermes/logs
 
 if [[ ! -d "$RELEASE_DIR" ]]; then
   install -d -m 0755 -o root -g root "$RELEASE_DIR"

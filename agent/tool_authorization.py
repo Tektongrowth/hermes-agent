@@ -27,4 +27,6 @@ def execution_authorization_block_message(
         return DENIED_MESSAGE
     if decision is True:
         return None
+    if isinstance(decision, str) and decision.strip():
+        return decision.strip()
     return DENIED_MESSAGE
