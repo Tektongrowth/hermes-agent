@@ -88,6 +88,8 @@ def test_installer_builds_from_a_commit_and_preserves_worktree_changes():
     assert "git clean" not in installer
     assert "git checkout" not in installer
     assert "useradd --system" in installer
+    assert "chgrp -R cjs-synkedup /opt/cjs-whiteout/venv" in installer
+    assert "chmod -R g+rX /opt/cjs-whiteout/venv" in installer
     assert "commit the CJS SynkedUP release files before installing" in installer
 
 

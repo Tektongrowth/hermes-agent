@@ -66,6 +66,8 @@ if [[ ! -x /opt/cjs-whiteout/venv/bin/python ]]; then
 fi
 /opt/cjs-whiteout/venv/bin/python -m pip install --disable-pip-version-check --quiet \
   -r /opt/cjs-whiteout/current/deployments/cjs_whiteout/requirements-synkedup.txt
+chgrp -R cjs-synkedup /opt/cjs-whiteout/venv
+chmod -R g+rX /opt/cjs-whiteout/venv
 
 for name in wait-for-local-port cjs-synkedup-status run-mason-gateway; do
   backup_path "/opt/cjs-whiteout/bin/$name"
