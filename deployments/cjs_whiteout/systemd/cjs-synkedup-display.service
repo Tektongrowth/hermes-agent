@@ -1,0 +1,31 @@
+[Unit]
+Description=CJS SynkedUP isolated X display
+After=network.target
+
+[Service]
+Type=simple
+User=cjs-synkedup
+Group=cjs-synkedup
+Environment=HOME=/var/lib/cjs-synkedup
+ExecStart=/usr/bin/Xvfb :120 -screen 0 1440x900x24 -nolisten tcp -noreset
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+TasksMax=64
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

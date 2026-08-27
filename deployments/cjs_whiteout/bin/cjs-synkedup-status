@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Report CJS SynkedUP lane state without returning business or credential data."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+EXPECTED = {9341, 9342}
+LOGIN_PATH = re.compile(r"/(?:login|log-in|signin|sign-in|auth)(?:/|$)", re.I)
+
+
+def listeners() -> tuple[dict[int, list[str]], bool]:
+    output = subprocess.check_output(["/usr/bin/ss", "-ltnH"], text=True)
+    found = {port: [] for port in EXPECTED}
+    external = False
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3]
+        for port in EXPECTED:
+            if local.endswith(f":{port}"):
+                found[port].append(local)
+                if not (
+                    local.startswith("127.0.0.1:")
+                    or local.startswith("[::1]:")
+                    or local.startswith("::1:")
+                ):
+                    external = True
+    return found, external
+
+
+def browser_state() -> str:
+    with urllib.request.urlopen("http://127.0.0.1:9341/json/list", timeout=3) as response:
+        targets = json.loads(response.read().decode("utf-8"))
+    pages = [item for item in targets if isinstance(item, dict) and item.get("type") == "page"]
+    if not pages:
+        return "no_page"
+    parsed = urllib.parse.urlsplit(str(pages[0].get("url", "")))
+    if parsed.hostname != "app.synkedup.com":
+        if LOGIN_PATH.search(parsed.path):
+            return "reauthentication_required"
+        return "unexpected_origin"
+    if LOGIN_PATH.search(parsed.path):
+        return "reauthentication_required"
+    return "authenticated_or_pending_ui_check"
+
+
+def main() -> int:
+    try:
+        found, external = listeners()
+        state = browser_state()
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error_class": type(exc).__name__}, sort_keys=True))
+        return 1
+    payload = {
+        "ok": not external and all(found.values()),
+        "tenant": "cjs-landscape",
+        "cdp_loopback": bool(found[9341]) and not external,
+        "mcp_loopback": bool(found[9342]) and not external,
+        "browser_session": state,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if payload["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

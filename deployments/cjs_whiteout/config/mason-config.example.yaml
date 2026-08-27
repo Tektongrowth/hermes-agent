@@ -1,0 +1,119 @@
+# CJS Mason production profile template.
+# Secrets are loaded into the service environment from AWS SSM at runtime.
+# User and role keys below are immutable Discord snowflake IDs, never names.
+# Default is deny-all. Alyssa and Nick have admin-read access to the complete
+# read-only SynkedUP catalog.
+
+_config_version: 8
+model:
+  provider: openrouter
+  default: google/gemini-2.5-flash
+timezone: America/New_York
+group_sessions_per_user: true
+memory:
+  provider: none
+agent:
+  disabled_toolsets:
+  - terminal
+  - browser
+  - file
+  - code_execution
+  - web
+  - memory
+  - skills
+  - todo
+discord:
+  require_mention: true
+  allowed_channels: 1539070492424675421,1539071026665885736
+  auto_thread: true
+  thread_require_mention: false
+  history_backfill: false
+  reactions: true
+platform_toolsets:
+  discord: []
+cjs_permission_profiles:
+  none: []
+  operations:
+  - synkedup-reference-read
+  - synkedup-operations-read
+  sales:
+  - synkedup-reference-read
+  - synkedup-sales-read
+  financial:
+  - synkedup-reference-read
+  - synkedup-financial-read
+  admin-read: &id001
+  - synkedup-reference-read
+  - synkedup-operations-read
+  - synkedup-sales-read
+  - synkedup-financial-read
+platform_principal_toolsets:
+  discord:
+    guilds:
+    - '1539070491942453268'
+    admin_users:
+    - '1412944834372829245'
+    default: []
+    users:
+      '1412944834372829245': *id001
+      '1541580058152665199': *id001
+    roles: {}
+mcp_servers:
+  cjs-synkedup:
+    url: http://127.0.0.1:9342/mcp
+    timeout: 60
+    connect_timeout: 20
+    supports_parallel_tool_calls: false
+    tools:
+      resources: false
+      prompts: false
+      toolsets:
+        synkedup-reference-read:
+        - synkedup_connection_health
+        - synkedup_session_status
+        - synkedup_company_profile
+        - synkedup_employees
+        - synkedup_crews
+        - synkedup_divisions
+        - synkedup_items
+        - synkedup_vendors
+        synkedup-operations-read:
+        - synkedup_jobs
+        - synkedup_job_briefs
+        - synkedup_maintenance
+        - synkedup_service_tickets
+        - synkedup_schedules
+        - synkedup_routes
+        - synkedup_work_areas
+        - synkedup_job_notes
+        - synkedup_job_attachments
+        - synkedup_job_photos
+        - synkedup_job_documents
+        - synkedup_time_entries
+        - synkedup_clock_status
+        - synkedup_labor_variance
+        - synkedup_materials
+        - synkedup_equipment
+        - synkedup_subcontractors
+        - synkedup_item_quantities
+        - synkedup_operations_dashboard
+        - synkedup_operations_reports
+        - synkedup_exports
+        synkedup-sales-read:
+        - synkedup_customers
+        - synkedup_properties
+        - synkedup_leads
+        - synkedup_consultations
+        - synkedup_estimates
+        - synkedup_proposals
+        - synkedup_sales_pipeline
+        - synkedup_pricing_catalog
+        synkedup-financial-read:
+        - synkedup_job_costing
+        - synkedup_margins
+        - synkedup_invoices
+        - synkedup_balances
+        - synkedup_payment_status
+        - synkedup_accounting_sync
+        - synkedup_financial_dashboard
+        - synkedup_financial_reports

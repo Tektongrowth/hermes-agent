@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set +x
+umask 077
+
+AWS=/home/linuxbrew/.linuxbrew/bin/aws
+PYTHON=/home/nick/.hermes/hermes-agent/venv/bin/python
+REGION=us-west-2
+PROFILE=tekton
+
+read_parameter() {
+  local name="$1"
+  "$AWS" --profile "$PROFILE" --region "$REGION" ssm get-parameter \
+    --name "$name" --with-decryption --query 'Parameter.Value' --output text
+}
+
+DISCORD_BOT_TOKEN="$(read_parameter /tekton/clients/cjs-whiteout/runtime/discord/bot-token)"
+OPENROUTER_API_KEY="$(read_parameter /tekton/clients/cjs-whiteout/runtime/openrouter/api-key)"
+
+if [[ -z "$DISCORD_BOT_TOKEN" || -z "$OPENROUTER_API_KEY" ]]; then
+  echo "required CJS runtime credentials are unavailable" >&2
+  exit 1
+fi
+
+export DISCORD_BOT_TOKEN OPENROUTER_API_KEY
+export DISCORD_HOME_CHANNEL=1539071026665885736
+export HERMES_HOME=/var/lib/cjs-whiteout/hermes
+export PYTHONPATH=/opt/cjs-whiteout/current
+export AWS_PAGER=""
+
+cd /opt/cjs-whiteout/current
+exec "$PYTHON" -m hermes_cli.main gateway run --replace

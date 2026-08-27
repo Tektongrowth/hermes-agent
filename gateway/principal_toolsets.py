@@ -207,3 +207,64 @@ def resolve_principal_toolsets(
         # toolset set or use an exact-user override.
         return []
     return default
+
+
+def _configured_channel_ids(user_config: Any, platform_key: str) -> Optional[set[str]]:
+    """Return the platform channel allowlist, or None when no gate is configured."""
+    if not isinstance(user_config, dict):
+        return set()
+    platform_name = str(getattr(platform_key, "value", platform_key))
+    platform_config = user_config.get(platform_name)
+    if not isinstance(platform_config, dict) or "allowed_channels" not in platform_config:
+        return None
+    raw = platform_config.get("allowed_channels")
+    if isinstance(raw, str):
+        return {item.strip() for item in raw.split(",") if item.strip()}
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return {item for item in raw if item}
+    return set()
+
+
+def principal_execution_tool_authorized(
+    user_config: Any,
+    platform_key: str,
+    source: Any,
+    tool_name: str,
+    *,
+    registry: Any,
+    fallback_toolsets: list[str],
+) -> bool:
+    """Recheck principal, guild, channel, and toolset immediately before a tool.
+
+    Legacy platforms without a principal policy retain their existing behavior.
+    Once a policy is present, malformed config, a DM, a different guild or
+    channel, an unknown tool, or a revoked toolset all fail closed.
+    """
+    if not principal_policy_present(user_config, platform_key):
+        return True
+    if not principal_guild_authorized(user_config, platform_key, source):
+        return False
+
+    allowed_channels = _configured_channel_ids(user_config, platform_key)
+    if allowed_channels is not None:
+        source_channels = {
+            str(value)
+            for value in (
+                getattr(source, "chat_id", None),
+                getattr(source, "parent_chat_id", None),
+            )
+            if value
+        }
+        if not source_channels.intersection(allowed_channels):
+            return False
+
+    allowed_toolsets = set(
+        resolve_principal_toolsets(
+            user_config,
+            platform_key,
+            source,
+            fallback_toolsets,
+        )
+    )
+    toolset = registry.get_toolset_for_tool(str(tool_name or ""))
+    return bool(toolset) and toolset in allowed_toolsets

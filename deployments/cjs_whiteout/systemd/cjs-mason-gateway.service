@@ -1,0 +1,43 @@
+[Unit]
+Description=CJS Mason Discord gateway
+After=network-online.target cjs-synkedup-mcp.service
+Wants=network-online.target
+Requires=cjs-synkedup-mcp.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=nick
+Group=nick
+SupplementaryGroups=cjs-synkedup
+WorkingDirectory=/opt/cjs-whiteout/current
+Environment=HOME=/home/nick
+Environment=HERMES_HOME=/var/lib/cjs-whiteout/hermes
+Environment=PATH=/home/nick/.hermes/hermes-agent/venv/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/cjs-whiteout/bin/run-mason-gateway
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cjs-whiteout/hermes /var/log/cjs-synkedup
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=512
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

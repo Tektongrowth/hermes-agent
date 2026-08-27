@@ -3347,32 +3347,135 @@ def _existing_tool_names() -> List[str]:
     return names
 
 
+_GRANULAR_TOOLSET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _resolve_granular_toolset_assignments(
+    server_name: str,
+    tools_filter: dict,
+    selected_tool_names: set[str],
+    registry: Any,
+) -> Optional[dict[str, str]]:
+    """Validate and invert ``tools.toolsets`` for one MCP server.
+
+    When ``tools.toolsets`` is present, validation is all-or-nothing. Every
+    selected server tool must appear exactly once, unknown or duplicate names
+    reject the entire server registration, and names that collide with built-in
+    toolsets are refused. An empty mapping means granular mode was requested
+    but invalid; ``None`` means legacy all-tools mode.
+    """
+    if "toolsets" not in tools_filter:
+        return None
+
+    raw = tools_filter.get("toolsets")
+    if not isinstance(raw, dict) or not raw:
+        logger.error(
+            "MCP server '%s': tools.toolsets must be a non-empty mapping; "
+            "registering no tools",
+            server_name,
+        )
+        return {}
+
+    try:
+        from toolsets import TOOLSETS
+        reserved_names = set(TOOLSETS)
+    except Exception:
+        logger.error(
+            "MCP server '%s': could not load reserved toolset names; "
+            "registering no tools",
+            server_name,
+        )
+        return {}
+
+    reserved_names.update(registry.get_registered_toolset_aliases())
+    assignments: dict[str, str] = {}
+    valid = True
+
+    for toolset_name, raw_tools in raw.items():
+        if (
+            not isinstance(toolset_name, str)
+            or not _GRANULAR_TOOLSET_NAME_RE.fullmatch(toolset_name)
+            or toolset_name in reserved_names
+            or toolset_name.startswith("mcp-")
+            or toolset_name.startswith("hermes-")
+        ):
+            logger.error(
+                "MCP server '%s': invalid or reserved granular toolset name %r",
+                server_name,
+                toolset_name,
+            )
+            valid = False
+            continue
+        if (
+            not isinstance(raw_tools, list)
+            or not raw_tools
+            or any(not isinstance(item, str) or not item for item in raw_tools)
+        ):
+            logger.error(
+                "MCP server '%s': granular toolset '%s' must contain a "
+                "non-empty list of tool names",
+                server_name,
+                toolset_name,
+            )
+            valid = False
+            continue
+        for raw_tool_name in raw_tools:
+            if raw_tool_name in assignments:
+                logger.error(
+                    "MCP server '%s': tool '%s' appears in more than one "
+                    "granular toolset",
+                    server_name,
+                    raw_tool_name,
+                )
+                valid = False
+                continue
+            assignments[raw_tool_name] = toolset_name
+
+    assigned_names = set(assignments)
+    unknown = assigned_names - selected_tool_names
+    unmapped = selected_tool_names - assigned_names
+    if unknown:
+        logger.error(
+            "MCP server '%s': tools.toolsets references unknown or filtered "
+            "tools: %s",
+            server_name,
+            ", ".join(sorted(unknown)),
+        )
+        valid = False
+    if unmapped:
+        logger.error(
+            "MCP server '%s': granular mode leaves tools unmapped: %s",
+            server_name,
+            ", ".join(sorted(unmapped)),
+        )
+        valid = False
+
+    return assignments if valid else {}
+
+
 def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> List[str]:
     """Register tools from an already-connected server into the registry.
 
-    Handles include/exclude filtering and utility tools. Toolset resolution
-    for ``mcp-{server}`` and raw server-name aliases is derived from the live
-    registry, rather than mutating ``toolsets.TOOLSETS`` at runtime.
-
-    Used by both initial discovery and dynamic refresh (list_changed).
-
-    Returns:
-        List of registered prefixed tool names.
+    ``tools.toolsets`` optionally assigns each raw MCP tool to one granular
+    Hermes toolset. This keeps one authenticated connector while allowing the
+    gateway's immutable principal policy to expose only approved tool groups.
     """
     from tools.registry import registry
 
     registered_names: List[str] = []
-    toolset_name = f"mcp-{name}"
+    default_toolset_name = f"mcp-{name}"
 
-    # Selective tool loading: honour include/exclude lists from config.
-    # Rules (matching issue #690 spec):
-    #   tools.include — whitelist: only these tool names are registered
-    #   tools.exclude — blacklist: all tools EXCEPT these are registered
-    #   include takes precedence over exclude
-    #   Neither set → register all tools (backward-compatible default)
+    # Selective tool loading: include wins over exclude; neither means all.
     tools_filter = config.get("tools") or {}
-    include_set = _normalize_name_filter(tools_filter.get("include"), f"mcp_servers.{name}.tools.include")
-    exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
+    if not isinstance(tools_filter, dict):
+        logger.error("MCP server '%s': tools must be a mapping", name)
+        return []
+    include_set = _normalize_name_filter(
+        tools_filter.get("include"), f"mcp_servers.{name}.tools.include"
+    )
+    exclude_set = _normalize_name_filter(
+        tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude"
+    )
 
     def _should_register(tool_name: str) -> bool:
         if include_set:
@@ -3381,24 +3484,48 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             return tool_name not in exclude_set
         return True
 
+    selected_tool_names = {
+        mcp_tool.name for mcp_tool in server._tools if _should_register(mcp_tool.name)
+    }
+    granular_assignments = _resolve_granular_toolset_assignments(
+        name, tools_filter, selected_tool_names, registry
+    )
+    if granular_assignments == {}:
+        return []
+
     for mcp_tool in server._tools:
         if not _should_register(mcp_tool.name):
-            logger.debug("MCP server '%s': skipping tool '%s' (filtered by config)", name, mcp_tool.name)
+            logger.debug(
+                "MCP server '%s': skipping tool '%s' (filtered by config)",
+                name,
+                mcp_tool.name,
+            )
             continue
 
-        # Scan tool description for prompt injection patterns
         _scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
-
         schema = _convert_mcp_schema(name, mcp_tool)
         tool_name_prefixed = schema["name"]
+        toolset_name = (
+            granular_assignments[mcp_tool.name]
+            if granular_assignments is not None
+            else default_toolset_name
+        )
 
-        # Guard against collisions with built-in (non-MCP) tools.
+        # A dynamic refresh may re-register the same tool in its same granular
+        # toolset. Any different non-MCP owner remains a protected collision.
         existing_toolset = registry.get_toolset_for_tool(tool_name_prefixed)
-        if existing_toolset and not existing_toolset.startswith("mcp-"):
+        if (
+            existing_toolset
+            and existing_toolset != toolset_name
+            and not existing_toolset.startswith("mcp-")
+        ):
             logger.warning(
                 "MCP server '%s': tool '%s' (→ '%s') collides with built-in "
                 "tool in toolset '%s' — skipping to preserve built-in",
-                name, mcp_tool.name, tool_name_prefixed, existing_toolset,
+                name,
+                mcp_tool.name,
+                tool_name_prefixed,
+                existing_toolset,
             )
             continue
 
@@ -3414,8 +3541,9 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         _track_mcp_tool_server(tool_name_prefixed, name)
         registered_names.append(tool_name_prefixed)
 
-    # Register MCP Resources & Prompts utility tools, filtered by config and
-    # only when the server actually supports the corresponding capability.
+    # Open-ended resource and prompt namespaces are disabled in granular mode.
+    # Registering them under the old all-tools alias would bypass principal
+    # policy. Legacy MCP servers keep the previous utility behavior.
     _handler_factories = {
         "list_resources": _make_list_resources_handler,
         "read_resource": _make_read_resource_handler,
@@ -3423,25 +3551,31 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         "get_prompt": _make_get_prompt_handler,
     }
     check_fn = _make_check_fn(name)
-    for entry in _select_utility_schemas(name, server, config):
+    utility_entries = (
+        []
+        if granular_assignments is not None
+        else _select_utility_schemas(name, server, config)
+    )
+    for entry in utility_entries:
         schema = entry["schema"]
         handler_key = entry["handler_key"]
         handler = _handler_factories[handler_key](name, server.tool_timeout)
         util_name = schema["name"]
 
-        # Same collision guard for utility tools.
         existing_toolset = registry.get_toolset_for_tool(util_name)
         if existing_toolset and not existing_toolset.startswith("mcp-"):
             logger.warning(
                 "MCP server '%s': utility tool '%s' collides with built-in "
                 "tool in toolset '%s' — skipping to preserve built-in",
-                name, util_name, existing_toolset,
+                name,
+                util_name,
+                existing_toolset,
             )
             continue
 
         registry.register(
             name=util_name,
-            toolset=toolset_name,
+            toolset=default_toolset_name,
             schema=schema,
             handler=handler,
             check_fn=check_fn,
@@ -3451,8 +3585,10 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         _track_mcp_tool_server(util_name, name)
         registered_names.append(util_name)
 
-    if registered_names:
-        registry.register_toolset_alias(name, toolset_name)
+    # The raw all-tools alias exists only for legacy mode. In granular mode the
+    # Discord principal policy must grant explicit narrow toolsets.
+    if registered_names and granular_assignments is None:
+        registry.register_toolset_alias(name, default_toolset_name)
 
     return registered_names
 

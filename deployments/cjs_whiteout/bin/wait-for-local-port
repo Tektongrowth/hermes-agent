@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Wait for a loopback TCP listener without probing any external host."""
+
+from __future__ import annotations
+
+import socket
+import sys
+import time
+
+
+def main() -> int:
+    if len(sys.argv) not in (2, 3):
+        print("usage: wait-for-local-port PORT [SECONDS]", file=sys.stderr)
+        return 64
+    try:
+        port = int(sys.argv[1])
+        timeout = int(sys.argv[2]) if len(sys.argv) == 3 else 30
+    except ValueError:
+        print("port and timeout must be integers", file=sys.stderr)
+        return 64
+    if not 1024 <= port <= 65535 or not 1 <= timeout <= 300:
+        print("port or timeout outside the allowed range", file=sys.stderr)
+        return 64
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return 0
+        except OSError:
+            time.sleep(0.25)
+    print(f"loopback port {port} did not become ready", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

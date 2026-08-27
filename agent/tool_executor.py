@@ -738,13 +738,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
-        # Check plugin hooks for a block directive before executing.
-        _block_msg: Optional[str] = None
-        _block_error_type = "plugin_block"
+        # Recheck principal policy after Tool Search unwrap and immediately
+        # before this sequential execution path can dispatch anything.
+        from agent.tool_authorization import execution_authorization_block_message
+
+        _block_msg: Optional[str] = execution_authorization_block_message(
+            agent, function_name, function_args
+        )
+        _block_error_type = "execution_authorization"
         if _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
-        else:
+        elif _block_msg is None:
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
                 _block_msg = get_pre_tool_call_block_message(
@@ -756,6 +761,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     turn_id=getattr(agent, "_current_turn_id", "") or "",
                     api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                 )
+                if _block_msg is not None:
+                    _block_error_type = "plugin_block"
             except Exception:
                 pass
 

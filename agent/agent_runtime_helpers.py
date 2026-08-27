@@ -1626,9 +1626,17 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     tools. Used by the concurrent execution path; the sequential path retains
     its own inline invocation for backward-compatible display handling.
     """
+    # Recheck the current principal policy immediately before every execution.
+    # This runs even when concurrent preflight already checked plugin hooks.
+    from agent.tool_authorization import execution_authorization_block_message
+
+    block_message: Optional[str] = execution_authorization_block_message(
+        agent, function_name, function_args
+    )
+    block_error_type = "execution_authorization"
+
     # Check plugin hooks for a block directive before executing anything.
-    block_message: Optional[str] = None
-    if not pre_tool_block_checked:
+    if block_message is None and not pre_tool_block_checked:
         try:
             from hermes_cli.plugins import get_pre_tool_call_block_message
             block_message = get_pre_tool_call_block_message(
@@ -1640,6 +1648,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
             )
+            if block_message is not None:
+                block_error_type = "plugin_block"
         except Exception:
             pass
     if block_message is not None:
@@ -1656,7 +1666,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                 status="blocked",
-                error_type="plugin_block",
+                error_type=block_error_type,
                 error_message=block_message,
             )
         except Exception:

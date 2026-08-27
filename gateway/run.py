@@ -18084,6 +18084,33 @@ class GatewayRunner:
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
 
+            # A schema-time grant is not enough for long-running turns. Re-read
+            # principal policy and channel scope immediately before every tool.
+            from gateway.principal_toolsets import (
+                principal_execution_tool_authorized,
+                principal_policy_present,
+            )
+            from tools.registry import registry as _execution_registry
+
+            _principal_policy_required = principal_policy_present(user_config, platform_key)
+
+            def _execution_tool_authorizer(tool_name: str, _tool_args: dict) -> bool:
+                fresh_config = _load_gateway_runtime_config()
+                if _principal_policy_required and not principal_policy_present(
+                    fresh_config, platform_key
+                ):
+                    return False
+                return principal_execution_tool_authorized(
+                    fresh_config,
+                    platform_key,
+                    source,
+                    tool_name,
+                    registry=_execution_registry,
+                    fallback_toolsets=enabled_toolsets,
+                )
+
+            agent.tool_authorization_callback = _execution_tool_authorizer
+
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []
             _bg_review_pending_lock = threading.Lock()

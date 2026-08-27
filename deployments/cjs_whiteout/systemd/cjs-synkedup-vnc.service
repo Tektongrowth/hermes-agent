@@ -1,0 +1,33 @@
+[Unit]
+Description=Temporary loopback-only VNC for CJS SynkedUP login
+After=cjs-synkedup-display.service cjs-synkedup-browser.service
+Requires=cjs-synkedup-display.service cjs-synkedup-browser.service
+
+[Service]
+Type=simple
+User=cjs-synkedup
+Group=cjs-synkedup
+Environment=HOME=/var/lib/cjs-synkedup
+ExecStart=/usr/bin/x11vnc -display :120 -localhost -rfbport 5909 -forever -shared -nopw -noxdamage -quiet
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cjs-synkedup
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=64
+MemoryMax=256M
+
+# Deliberately no Install section. Start only for an authorized login session,
+# then stop it immediately after authentication succeeds.

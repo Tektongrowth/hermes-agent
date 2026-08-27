@@ -1,0 +1,47 @@
+[Unit]
+Description=CJS SynkedUP read-only MCP service
+After=network-online.target cjs-synkedup-browser.service
+Wants=network-online.target
+Requires=cjs-synkedup-browser.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=cjs-synkedup
+Group=cjs-synkedup
+WorkingDirectory=/opt/cjs-whiteout/current
+Environment=HOME=/var/lib/cjs-synkedup
+Environment=PYTHONUNBUFFERED=1
+Environment=CJS_SYNKEDUP_BASE_URL=https://app.synkedup.com
+Environment=CJS_SYNKEDUP_CDP_URL=http://127.0.0.1:9341
+Environment=CJS_SYNKEDUP_AUDIT_PATH=/var/log/cjs-synkedup/audit.jsonl
+Environment=CJS_SYNKEDUP_MCP_TRANSPORT=streamable-http
+Environment=CJS_SYNKEDUP_MCP_HOST=127.0.0.1
+Environment=CJS_SYNKEDUP_MCP_PORT=9342
+ExecStart=/opt/cjs-whiteout/venv/bin/python /opt/cjs-whiteout/current/deployments/cjs_whiteout/connectors/cjs_synkedup_mcp.py
+ExecStartPost=/opt/cjs-whiteout/bin/wait-for-local-port 9342 60
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/cjs-synkedup
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+TasksMax=128
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
