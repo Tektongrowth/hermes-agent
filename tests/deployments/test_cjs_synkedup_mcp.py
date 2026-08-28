@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -585,3 +586,120 @@ def test_dashboard_scan_navigates_back_to_dashboard_before_reading(monkeypatch):
             "https://app.synkedup.test",
         )
     ]
+
+
+def test_dashboard_job_cache_requires_matching_range_and_safe_routes(monkeypatch, tmp_path):
+    cache_path = tmp_path / "dashboard-jobs.json"
+    monkeypatch.setenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", str(cache_path))
+    dashboard = {
+        "date_start": "2026-07-27",
+        "date_end": "2026-08-27",
+        "jobs": [
+            {
+                "label": "AY-659: Landscape Renovation",
+                "href": "https://app.synkedup.test/#!/projects/466093-landscape-renovation",
+            }
+        ],
+    }
+
+    synkedup._write_dashboard_job_cache(dashboard)
+    loaded = synkedup._load_dashboard_job_cache(
+        origin="https://app.synkedup.test",
+        date_start="2026-07-27",
+        date_end="2026-08-27",
+        now=datetime.now(timezone.utc),
+    )
+
+    assert loaded is not None
+    assert loaded["jobs"] == dashboard["jobs"]
+    assert synkedup._load_dashboard_job_cache(
+        origin="https://app.synkedup.test",
+        date_start="2026-07-28",
+        date_end="2026-08-28",
+    ) is None
+
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload["jobs"][0]["href"] = "https://evil.test/#!/projects/466093"
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert synkedup._load_dashboard_job_cache(
+        origin="https://app.synkedup.test",
+        date_start="2026-07-27",
+        date_end="2026-08-27",
+    ) is None
+
+
+def test_dashboard_scan_uses_same_range_cache_when_widget_errors(monkeypatch, tmp_path):
+    cache_path = tmp_path / "dashboard-jobs.json"
+    monkeypatch.setenv("CJS_SYNKEDUP_BASE_URL", "https://app.synkedup.test")
+    monkeypatch.setenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", str(cache_path))
+    synkedup._write_dashboard_job_cache(
+        {
+            "date_start": "2026-07-27",
+            "date_end": "2026-08-27",
+            "jobs": [
+                {
+                    "label": "AY-659: Landscape Renovation",
+                    "href": "https://app.synkedup.test/#!/projects/466093-landscape-renovation",
+                }
+            ],
+        }
+    )
+
+    class FakeCDP:
+        def connect(self, host):
+            assert host == "app.synkedup.test"
+
+        def navigate(self, url, origin):
+            return {"url": url, "title": "Dashboard", "headings": ["Dashboard"]}
+
+        def evaluate_constant(self, expression):
+            assert expression == synkedup.EXTRACT_PAGE_SCRIPT
+            return {
+                "url": "https://app.synkedup.test/dashboard#!/",
+                "title": "Dashboard",
+                "headings": ["Dashboard"],
+            }
+
+        def command(self, method, params=None):
+            if method == "Target.createTarget":
+                return {"targetId": "worker-1"}
+            if method in {"Target.closeTarget", "Page.navigate"}:
+                return {}
+            raise AssertionError(f"unexpected command: {method}")
+
+        def connect_target(self, target_id):
+            assert target_id == "worker-1"
+
+        def close(self):
+            return None
+
+    def fake_wait(client, expression, predicate):
+        if expression == synkedup.DASHBOARD_LABOR_JOBS_SCRIPT:
+            return {
+                "ready": False,
+                "error_loading": True,
+                "date_start": "2026-07-27",
+                "date_end": "2026-08-27",
+                "jobs": [],
+            }
+        assert expression == synkedup.PROJECT_LABOR_SUMMARY_SCRIPT
+        return {
+            "ready": True,
+            "number": "AY-659",
+            "name": "Landscape Renovation",
+            "status": "Completed",
+            "columns": ["Labor", "12h", "Variance", "10h"],
+            "financials": {},
+        }
+
+    monkeypatch.setattr(synkedup, "CDPClient", FakeCDP)
+    monkeypatch.setattr(synkedup, "_wait_for_constant", fake_wait)
+
+    result = synkedup.SynkedUPBrowser().labor_variance()
+
+    assert result["tables"][0]["rows"] == [
+        ["AY-659", "Landscape Renovation", "Completed", 10.0, 12.0, 2.0]
+    ]
+    fields = {field["label"]: field["value"] for field in result["fields"]}
+    assert fields["Dashboard job list source"] == "same-range cache"
+    assert result["alerts"]

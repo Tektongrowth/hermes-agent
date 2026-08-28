@@ -33,6 +33,8 @@ TENANT = "cjs-landscape"
 DEFAULT_BASE_URL = "https://app.synkedup.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9341"
 DEFAULT_AUDIT_PATH = "/var/log/cjs-synkedup/audit.jsonl"
+DEFAULT_DASHBOARD_CACHE_PATH = "/var/lib/cjs-synkedup/cache/dashboard-jobs.json"
+DASHBOARD_CACHE_MAX_AGE_SECONDS = 86_400
 MAX_QUERY_LENGTH = 100
 MAX_RECORD_ID_LENGTH = 80
 MAX_RESULT_ROWS = 100
@@ -219,19 +221,27 @@ EXTRACT_PAGE_SCRIPT = r"""
 DASHBOARD_LABOR_JOBS_SCRIPT = r"""
 (() => {
   const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const dates = Array.from(document.querySelectorAll('.main-dashboard input[date-range]')).map((input) => clean(input.value));
+  const errorLoading = (document.body.innerText || '').includes('Error loading data');
   const headers = Array.from(document.querySelectorAll('.ant-collapse-header-text'));
   const label = headers.find((el) => clean(el.innerText || el.textContent) === 'Jobs included in this data:');
   const header = label && label.closest('[role="button"]');
-  if (!header) return {ready: false, jobs: []};
+  if (!header) return {
+    ready: false,
+    error_loading: errorLoading,
+    date_start: dates[0] || '',
+    date_end: dates[1] || '',
+    jobs: []
+  };
   if (header.getAttribute('aria-expanded') !== 'true') header.click();
   const container = header.closest('.ant-collapse-item');
   const jobs = Array.from((container && container.querySelectorAll('a[href]')) || []).map((link) => {
     const url = new URL(link.href, location.href);
     return {label: clean(link.innerText || link.textContent), href: url.href};
   }).filter((job) => job.label && job.href);
-  const dates = Array.from(document.querySelectorAll('.main-dashboard input[date-range]')).map((input) => clean(input.value));
   return {
     ready: jobs.length > 0,
+    error_loading: errorLoading,
     date_start: dates[0] || '',
     date_end: dates[1] || '',
     jobs
@@ -554,6 +564,84 @@ def _hours_value(value: Any) -> float | None:
     return float(match.group(0).replace(",", ""))
 
 
+def _dashboard_cache_path() -> Path:
+    return Path(
+        os.getenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", DEFAULT_DASHBOARD_CACHE_PATH)
+    )
+
+
+def _write_dashboard_job_cache(dashboard: dict[str, Any]) -> None:
+    jobs = dashboard.get("jobs") or []
+    if not jobs or not dashboard.get("date_start") or not dashboard.get("date_end"):
+        return
+    payload = {
+        "tenant": TENANT,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "date_start": str(dashboard.get("date_start", "")),
+        "date_end": str(dashboard.get("date_end", "")),
+        "jobs": [
+            {
+                "label": str(job.get("label", ""))[:500],
+                "href": str(job.get("href", ""))[:2000],
+            }
+            for job in jobs[:MAX_RESULT_ROWS]
+            if isinstance(job, dict) and job.get("href")
+        ],
+    }
+    if not payload["jobs"]:
+        return
+    path = _dashboard_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def _load_dashboard_job_cache(
+    *,
+    origin: str,
+    date_start: str,
+    date_end: str,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    if not date_start or not date_end:
+        return None
+    try:
+        payload = json.loads(_dashboard_cache_path().read_text(encoding="utf-8"))
+        captured_at = datetime.fromisoformat(str(payload.get("captured_at", "")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - captured_at).total_seconds()
+    if age < -300 or age > DASHBOARD_CACHE_MAX_AGE_SECONDS:
+        return None
+    if payload.get("tenant") != TENANT:
+        return None
+    if payload.get("date_start") != date_start or payload.get("date_end") != date_end:
+        return None
+    jobs: list[dict[str, str]] = []
+    for job in payload.get("jobs") or []:
+        if not isinstance(job, dict):
+            return None
+        href = str(job.get("href", ""))
+        try:
+            _validate_dashboard_project_url(href, origin)
+        except SecurityViolation:
+            return None
+        jobs.append({"label": str(job.get("label", ""))[:500], "href": href})
+    if not jobs:
+        return None
+    return {
+        "ready": True,
+        "date_start": date_start,
+        "date_end": date_end,
+        "jobs": jobs[:MAX_RESULT_ROWS],
+        "cache_captured_at": captured_at.astimezone(timezone.utc).isoformat(),
+    }
+
+
 class SynkedUPBrowser:
     def __init__(self):
         self.base_url = os.getenv("CJS_SYNKEDUP_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -597,6 +685,7 @@ class SynkedUPBrowser:
         worker = CDPClient()
         target_id = ""
         dashboard: dict[str, Any] = {}
+        dashboard_source = "live"
         alerts: list[str] = []
         rows: list[list[Any]] = []
         try:
@@ -607,13 +696,33 @@ class SynkedUPBrowser:
             dashboard = _wait_for_constant(
                 controller,
                 DASHBOARD_LABOR_JOBS_SCRIPT,
-                lambda value: isinstance(value, dict) and bool(value.get("ready")),
+                lambda value: (
+                    isinstance(value, dict)
+                    and bool(value.get("ready") or value.get("error_loading"))
+                ),
             )
             if not isinstance(dashboard, dict) or not dashboard.get("ready"):
                 page = controller.evaluate_constant(EXTRACT_PAGE_SCRIPT)
                 if isinstance(page, dict) and _looks_logged_out(page):
                     raise ReauthenticationRequired("authenticated SynkedUP session is required")
-                raise RuntimeError("dashboard labor job list did not load")
+                cached = _load_dashboard_job_cache(
+                    origin=self.origin,
+                    date_start=str((dashboard or {}).get("date_start", "")),
+                    date_end=str((dashboard or {}).get("date_end", "")),
+                )
+                if cached is None:
+                    raise RuntimeError("dashboard labor job list did not load")
+                dashboard = cached
+                dashboard_source = "same-range cache"
+                alerts.append(
+                    "The dashboard job-costing panel was unavailable, so this scan used "
+                    "the most recent job list captured for the same dashboard date range."
+                )
+            else:
+                try:
+                    _write_dashboard_job_cache(dashboard)
+                except OSError:
+                    pass
 
             jobs = dashboard.get("jobs") or []
             created = controller.command("Target.createTarget", {"url": "about:blank", "background": True})
@@ -626,7 +735,7 @@ class SynkedUPBrowser:
                     continue
                 label = str(job.get("label", ""))[:500]
                 href = str(job.get("href", ""))
-                expected_number = label.split(":", 1)[0].strip()
+                expected_number = label.split(":", 1)[0].strip() if label else ""
                 _validate_dashboard_project_url(href, self.origin)
                 worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
                 project = _wait_for_constant(
@@ -635,7 +744,10 @@ class SynkedUPBrowser:
                     lambda value: (
                         isinstance(value, dict)
                         and bool(value.get("ready"))
-                        and str(value.get("number", "")) == expected_number
+                        and (
+                            not expected_number
+                            or str(value.get("number", "")) == expected_number
+                        )
                         and (
                             not include_financial
                             or bool((value.get("financials") or {}).get("final_total"))
@@ -723,6 +835,11 @@ class SynkedUPBrowser:
             "fields": [
                 {"label": "Dashboard start date", "value": str(dashboard.get("date_start", ""))},
                 {"label": "Dashboard end date", "value": str(dashboard.get("date_end", ""))},
+                {"label": "Dashboard job list source", "value": dashboard_source},
+                {
+                    "label": "Dashboard cache captured at",
+                    "value": str(dashboard.get("cache_captured_at", "")),
+                },
                 {"label": "Jobs scanned", "value": len(rows)},
                 {"label": "Estimated labor hours", "value": estimated_total},
                 {"label": "Actual labor hours", "value": actual_total},

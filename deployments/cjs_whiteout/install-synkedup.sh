@@ -50,7 +50,7 @@ fi
 usermod -a -G cjs-synkedup nick
 
 install -d -m 0755 -o root -g root /opt/cjs-whiteout /opt/cjs-whiteout/releases /opt/cjs-whiteout/bin
-install -d -m 0750 -o cjs-synkedup -g cjs-synkedup /var/lib/cjs-synkedup /var/lib/cjs-synkedup/chrome
+install -d -m 0750 -o cjs-synkedup -g cjs-synkedup /var/lib/cjs-synkedup /var/lib/cjs-synkedup/chrome /var/lib/cjs-synkedup/cache
 install -d -m 0770 -o cjs-synkedup -g cjs-synkedup /var/log/cjs-synkedup
 install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout /var/lib/cjs-whiteout/hermes
 install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout/hermes/state /var/lib/cjs-whiteout/hermes/logs

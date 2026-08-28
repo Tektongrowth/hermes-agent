@@ -98,9 +98,11 @@ def test_services_use_isolated_account_and_hardened_filesystem():
         assert "NoNewPrivileges=true" in text
         assert "ProtectSystem=strict" in text
         assert "UMask=0077" in text
-    assert "ReadWritePaths=/var/log/cjs-synkedup" in _read(
-        SYSTEMD / "cjs-synkedup-mcp.service"
-    )
+    mcp = _read(SYSTEMD / "cjs-synkedup-mcp.service")
+    assert "ReadWritePaths=/var/log/cjs-synkedup" in mcp
+    assert "/var/lib/cjs-synkedup/cache" in mcp
+    installer = _read(ROOT / "install-synkedup.sh")
+    assert "/var/lib/cjs-synkedup/cache" in installer
 
 
 def test_installer_builds_from_a_commit_and_preserves_worktree_changes():
