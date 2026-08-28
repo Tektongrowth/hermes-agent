@@ -488,6 +488,16 @@ def test_hours_value_parses_dashboard_hour_labels():
     assert synkedup._hours_value("") is None
 
 
+def test_financial_project_readiness_does_not_require_optional_final_total():
+    source = Path(synkedup.__file__).read_text(encoding="utf-8")
+    start = source.index("def project_ready")
+    end = source.index("project = _wait_for_constant", start)
+    project_ready_block = source[start:end]
+
+    assert "final_total" not in project_ready_block
+    assert "not expected_number" in project_ready_block
+
+
 def test_financial_tools_never_appear_in_operations_toolset():
     operations = set(synkedup.TOOL_NAMES_BY_ACCESS_CLASS["operations"])
     financial = set(synkedup.TOOL_NAMES_BY_ACCESS_CLASS["financial"])
@@ -858,7 +868,7 @@ def test_financial_scan_retries_project_when_costing_fields_are_late(monkeypatch
         def close(self):
             return None
 
-    def fake_wait(client, expression, predicate):
+    def fake_wait(client, expression, predicate, *, timeout=25.0):
         nonlocal project_reads
         if expression == synkedup.DASHBOARD_LABOR_JOBS_SCRIPT:
             return {
@@ -899,7 +909,7 @@ def test_financial_scan_retries_project_when_costing_fields_are_late(monkeypatch
     result = synkedup.SynkedUPBrowser().labor_variance(include_financial=True)
 
     assert project_reads == 2
-    assert len(navigations) == 2
+    assert len(navigations) == 1
     assert result["tables"][0]["rows"][0][8] == "$9,500.00"
     assert not any("could not be read" in alert for alert in result["alerts"])
     assert (tmp_path / "job-costing.json").is_file()

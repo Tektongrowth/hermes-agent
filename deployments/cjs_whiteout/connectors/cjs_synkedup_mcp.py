@@ -847,16 +847,14 @@ class SynkedUPBrowser:
                 _validate_dashboard_project_url(href, self.origin)
                 worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
                 def project_ready(value: Any) -> bool:
+                    # A missing final total is a valid result that is reported below.
+                    # Do not spend two 25-second waits treating it as an unloaded page.
                     return (
                         isinstance(value, dict)
                         and bool(value.get("ready"))
                         and (
                             not expected_number
                             or str(value.get("number", "")) == expected_number
-                        )
-                        and (
-                            not include_financial
-                            or bool((value.get("financials") or {}).get("final_total"))
                         )
                     )
 
@@ -865,6 +863,19 @@ class SynkedUPBrowser:
                     PROJECT_LABOR_SUMMARY_SCRIPT,
                     project_ready,
                 )
+                if (
+                    project_ready(project)
+                    and include_financial
+                    and not bool(((project or {}).get("financials") or {}).get("final_total"))
+                ):
+                    refreshed = _wait_for_constant(
+                        worker,
+                        PROJECT_LABOR_SUMMARY_SCRIPT,
+                        project_ready,
+                        timeout=2.0,
+                    )
+                    if isinstance(refreshed, dict):
+                        project = refreshed
                 if not project_ready(project):
                     worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
                     project = _wait_for_constant(

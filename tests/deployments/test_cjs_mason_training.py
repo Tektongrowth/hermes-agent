@@ -62,6 +62,23 @@ def test_training_hook_ignores_success_and_non_discord(tmp_path, monkeypatch) ->
     assert not (tmp_path / "state" / "mason-training-requests.jsonl").exists()
 
 
+def test_training_hook_recognizes_honest_tool_failure_variants(tmp_path, monkeypatch) -> None:
+    hook = _load_hook()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("MASON_TRAINING_ALERT_CHANNEL", raising=False)
+    hook.handle(
+        "agent:end",
+        {
+            "platform": "discord",
+            "response": "I couldn't pull the SynkedUP data right now, and I'm not going to guess.",
+            "message": "Compare completed jobs.",
+        },
+    )
+    records = (tmp_path / "state" / "mason-training-requests.jsonl").read_text().splitlines()
+    assert len(records) == 1
+
+
 def test_training_hook_records_notifies_and_deduplicates(tmp_path, monkeypatch) -> None:
     hook = _load_hook()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

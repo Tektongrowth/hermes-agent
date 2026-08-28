@@ -8,7 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-TRIGGER = "i couldn't complete that with mason's current tools"
+TRIGGERS = (
+    "i couldn't complete that with mason's current tools",
+    "i couldn't pull the",
+    "i couldn't access the",
+    "i can't access the",
+    "i was unable to",
+)
 
 def _home() -> Path:
     return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
@@ -71,7 +77,7 @@ def handle(event_type: str, context: dict[str, Any]) -> None:
     if event_type != "agent:end" or str(context.get("platform", "")).casefold() != "discord":
         return
     response = _safe(context.get("response"))
-    if TRIGGER not in response.casefold():
+    if not any(trigger in response.casefold() for trigger in TRIGGERS):
         return
     request = _safe(context.get("message"))
     fingerprint = _fingerprint(request, response)
