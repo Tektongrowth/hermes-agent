@@ -40,6 +40,11 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
     review = (skills_root / "job-cost-project-review" / "SKILL.md").read_text()
     assert "Never state a count that differs from the number of jobs actually listed" in review
 
+    lookup = (skills_root / "cjs-job-lookup" / "SKILL.md").read_text()
+    assert "Do not stop at the first empty or partial match" in lookup
+    assert "00 - Sold YYYY" in lookup
+    assert "composio_read_drive_pdf" in lookup
+
 
 def test_mason_config_enables_skills_for_alyssa_without_generic_toolsets() -> None:
     config = yaml.safe_load((ROOT / "config" / "mason-config.example.yaml").read_text())
