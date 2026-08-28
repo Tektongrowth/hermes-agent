@@ -581,7 +581,7 @@ def test_dashboard_scan_navigates_back_to_dashboard_before_reading(monkeypatch):
     assert result["tables"][0]["rows"] == []
     assert instances[0].navigated == [
         (
-            "https://app.synkedup.test/dashboard#!/",
+            "https://app.synkedup.test/dashboard",
             "https://app.synkedup.test",
         )
     ]

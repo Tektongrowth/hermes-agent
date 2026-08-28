@@ -592,7 +592,7 @@ class SynkedUPBrowser:
         return page
 
     def labor_variance(self, *, include_financial: bool = False) -> dict[str, Any]:
-        dashboard_url = f"{self.base_url}/dashboard#!/"
+        dashboard_url = f"{self.base_url}/dashboard"
         controller = CDPClient()
         worker = CDPClient()
         target_id = ""
