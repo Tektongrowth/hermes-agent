@@ -17,6 +17,7 @@ def configured(monkeypatch, tmp_path):
     monkeypatch.setenv("CJS_COMPOSIO_TOOL_PREFIXES", "GOOGLEDRIVE,OUTLOOK")
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT", "googledrive_test-account")
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK", "outlook_test-account")
+    monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK_WHITEOUT", "whiteout_test-account")
     monkeypatch.setenv("CJS_COMPOSIO_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setattr(bridge, "_composio_binary", lambda: "/safe/composio")
 
@@ -60,6 +61,22 @@ def test_execute_pins_outlook_to_the_cjs_mailbox(monkeypatch):
     monkeypatch.setattr(bridge.subprocess, "run", fake_run)
     bridge.composio_execute("OUTLOOK_QUERY_EMAILS", {"folder": "inbox", "top": 1})
     assert seen["argv"][3:5] == ["--account", "outlook_test-account"]
+
+
+def test_execute_can_route_outlook_to_the_whiteout_mailbox(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout='{"successful":true}', stderr="")
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    bridge.composio_execute(
+        "OUTLOOK_QUERY_EMAILS",
+        {"folder": "inbox", "top": 1},
+        mailbox="whiteout",
+    )
+    assert seen["argv"][3:5] == ["--account", "whiteout_test-account"]
 
 
 def test_tool_slug_rejects_shell_metacharacters():
@@ -113,6 +130,11 @@ def test_missing_outlook_account_fails_closed(monkeypatch):
     monkeypatch.delenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK")
     with pytest.raises(bridge.BridgeConfigurationError, match="OUTLOOK"):
         bridge._account_selector("OUTLOOK_QUERY_EMAILS")
+
+
+def test_unknown_mailbox_fails_closed():
+    with pytest.raises(bridge.BridgeRequestError, match="cjs or whiteout"):
+        bridge._account_selector("OUTLOOK_QUERY_EMAILS", "other")
 
 
 def test_cli_parser_accepts_json_with_trailing_download_status():

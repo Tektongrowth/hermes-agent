@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -92,9 +92,15 @@ def _approved_prefixes() -> tuple[str, ...]:
     return prefixes
 
 
-def _account_selector(tool_slug: str = "") -> str:
+def _account_selector(tool_slug: str = "", mailbox: str = "cjs") -> str:
     prefix = str(tool_slug or "").strip().upper().split("_", 1)[0]
-    env_name = f"CJS_COMPOSIO_ACCOUNT_{prefix}" if prefix else "CJS_COMPOSIO_ACCOUNT"
+    mailbox_key = str(mailbox or "cjs").strip().lower()
+    if mailbox_key not in {"cjs", "whiteout"}:
+        raise BridgeRequestError("mailbox must be cjs or whiteout")
+    if prefix == "OUTLOOK" and mailbox_key == "whiteout":
+        env_name = "CJS_COMPOSIO_ACCOUNT_OUTLOOK_WHITEOUT"
+    else:
+        env_name = f"CJS_COMPOSIO_ACCOUNT_{prefix}" if prefix else "CJS_COMPOSIO_ACCOUNT"
     selector = os.getenv(env_name, "").strip()
     if not selector and prefix == "GOOGLEDRIVE":
         selector = os.getenv("CJS_COMPOSIO_ACCOUNT", "").strip()
@@ -586,7 +592,14 @@ def _render_pdf_pages(pdf_path: Path, workdir: Path, pages: int) -> list[bytes]:
     return rendered
 
 
-def _audit(tool: str, status: str, started: float, *, remote_tool: str = "") -> None:
+def _audit(
+    tool: str,
+    status: str,
+    started: float,
+    *,
+    remote_tool: str = "",
+    mailbox: str = "cjs",
+) -> None:
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tenant": "cjs-landscape",
@@ -594,7 +607,9 @@ def _audit(tool: str, status: str, started: float, *, remote_tool: str = "") -> 
         "remote_tool": remote_tool,
         "status": status,
         "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
-        "account_hash": hashlib.sha256(_account_selector(remote_tool).encode()).hexdigest()[:12],
+        "account_hash": hashlib.sha256(
+            _account_selector(remote_tool, mailbox).encode()
+        ).hexdigest()[:12],
     }
     path = Path(os.getenv("CJS_COMPOSIO_AUDIT_PATH", DEFAULT_AUDIT_PATH))
     with _AUDIT_LOCK:
@@ -673,16 +688,21 @@ def composio_search(query: str, limit: StrictLimit = 10) -> Any:
 
 
 @mcp.tool()
-def composio_tool_schema(tool_slug: str) -> Any:
+def composio_tool_schema(
+    tool_slug: str,
+    mailbox: Literal["cjs", "whiteout"] = "cjs",
+) -> Any:
     """Read the input schema for one tool in an approved Composio toolkit."""
     started = time.monotonic()
     slug = _validate_tool_slug(tool_slug)
     try:
-        result = _run(["execute", slug, "--account", _account_selector(slug), "--get-schema"])
-        _audit("composio_tool_schema", "ok", started, remote_tool=slug)
+        result = _run(
+            ["execute", slug, "--account", _account_selector(slug, mailbox), "--get-schema"]
+        )
+        _audit("composio_tool_schema", "ok", started, remote_tool=slug, mailbox=mailbox)
         return result
     except Exception:
-        _audit("composio_tool_schema", "error", started, remote_tool=slug)
+        _audit("composio_tool_schema", "error", started, remote_tool=slug, mailbox=mailbox)
         raise
 
 
@@ -838,6 +858,7 @@ def composio_execute(
     tool_slug: str,
     arguments: dict[str, Any],
     dry_run: bool = False,
+    mailbox: Literal["cjs", "whiteout"] = "cjs",
 ) -> Any:
     """Execute any tool in an approved toolkit against the pinned CJS account.
 
@@ -850,7 +871,7 @@ def composio_execute(
         "execute",
         slug,
         "--account",
-        _account_selector(slug),
+        _account_selector(slug, mailbox),
         "--data",
         _bounded_arguments(arguments),
     ]
@@ -858,10 +879,10 @@ def composio_execute(
         args.append("--dry-run")
     try:
         result = _run(args)
-        _audit("composio_execute", "ok", started, remote_tool=slug)
+        _audit("composio_execute", "ok", started, remote_tool=slug, mailbox=mailbox)
         return result
     except Exception:
-        _audit("composio_execute", "error", started, remote_tool=slug)
+        _audit("composio_execute", "error", started, remote_tool=slug, mailbox=mailbox)
         raise
 
 
