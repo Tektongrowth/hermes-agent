@@ -799,8 +799,15 @@ class SynkedUPBrowser:
                 if include_financial:
                     financials = project.get("financials") or {}
                     if not financials.get("final_total"):
+                        project_label = (
+                            expected_number
+                            or label
+                            or str(project.get("number", ""))
+                            or str(project.get("name", ""))
+                            or "a dashboard job"
+                        )
                         alerts.append(
-                            f"Job totals and profit could not be read for {expected_number or label}."
+                            f"Job totals and profit could not be read for {project_label}."
                         )
                     row.extend(
                         [
