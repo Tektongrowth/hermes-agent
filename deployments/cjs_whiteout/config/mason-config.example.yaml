@@ -24,7 +24,7 @@ agent:
   - todo
 discord:
   require_mention: true
-  allowed_channels: 1539070492424675421,1539071026665885736
+  allowed_channels: 1539070492424675421,1539071026665885736,1542715089638002789
   auto_thread: true
   thread_require_mention: false
   history_backfill: false
@@ -89,6 +89,7 @@ mcp_servers:
         - composio_search
         - composio_tool_schema
         - composio_read_drive_pdf
+        - composio_read_drive_spreadsheet
         - composio_execute
   cjs-synkedup:
     url: http://127.0.0.1:9342/mcp

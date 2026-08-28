@@ -388,7 +388,8 @@ def test_labor_variance_uses_dashboard_scan_and_filters_record_id(monkeypatch, t
     }
 
     class FakeBrowser:
-        def labor_variance(self):
+        def labor_variance(self, *, include_financial=False):
+            assert include_financial is False
             return json.loads(json.dumps(raw))
 
         def read(self, spec, *, record_id=""):
@@ -408,6 +409,75 @@ def test_labor_variance_uses_dashboard_scan_and_filters_record_id(monkeypatch, t
     encoded = json.dumps(result).casefold()
     assert "actual hours" in encoded
     assert "actual cost" not in encoded
+
+
+def test_job_costing_uses_dashboard_scan_with_financial_fields(monkeypatch, tmp_path):
+    raw = {
+        "url": "https://app.synkedup.test/dashboard#!/",
+        "title": "SynkedUP Dashboard Job Costing",
+        "headings": ["Jobs included in this data"],
+        "alerts": [],
+        "fields": [],
+        "tables": [
+            {
+                "headers": [
+                    "Job Number",
+                    "Name",
+                    "Status",
+                    "Estimated Hours",
+                    "Actual Hours",
+                    "Variance Hours",
+                    "Estimated Total",
+                    "Actual Total",
+                    "Final Total",
+                    "Estimated Net Profit %",
+                    "Estimated Net Profit $",
+                    "Final Net Profit %",
+                    "Final Net Profit $",
+                ],
+                "rows": [
+                    [
+                        "AY-659",
+                        "Landscape Renovation",
+                        "Completed",
+                        379.0,
+                        580.37,
+                        201.37,
+                        "$100,000",
+                        "$110,000",
+                        "$105,000",
+                        "25%",
+                        "$25,000",
+                        "20%",
+                        "$21,000",
+                    ]
+                ],
+            }
+        ],
+        "cards": [],
+        "links": [],
+    }
+
+    class FakeBrowser:
+        def labor_variance(self, *, include_financial=False):
+            assert include_financial is True
+            return json.loads(json.dumps(raw))
+
+        def read(self, spec, *, record_id=""):
+            raise AssertionError("generic page read must not be used for job costing")
+
+    monkeypatch.setattr(synkedup, "SynkedUPBrowser", FakeBrowser)
+    monkeypatch.setattr(synkedup, "_AUDIT", synkedup.AuditLogger(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(synkedup._RATE_LIMITER, "acquire", lambda: None)
+    result = synkedup._execute_read(synkedup.TOOL_SPEC_BY_NAME["synkedup_job_costing"])
+
+    assert result["ok"] is True
+    headers = result["data"]["tables"][0]["headers"]
+    row = result["data"]["tables"][0]["rows"][0]
+    assert "Estimated Net Profit %" in headers
+    assert "Final Net Profit $" in headers
+    assert "$100,000" in row
+    assert "$21,000" in row
 
 
 def test_hours_value_parses_dashboard_hour_labels():

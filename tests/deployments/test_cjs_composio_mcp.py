@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from openpyxl import Workbook
 
 from deployments.cjs_whiteout.connectors import cjs_composio_mcp as bridge
 
@@ -312,11 +313,96 @@ def test_read_drive_pdf_rejects_malformed_file_id(monkeypatch):
         bridge.composio_read_drive_pdf("../bad")
 
 
+def test_read_drive_spreadsheet_exports_and_returns_bounded_rows(monkeypatch):
+    seen = {}
+    download_url = (
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file"
+        "?X-Amz-Signature=x"
+    )
+
+    def fake_run(args, timeout=bridge.DEFAULT_TIMEOUT_SECONDS, sanitize_result=True):
+        seen["args"] = args
+        seen["timeout"] = timeout
+        seen["sanitize_result"] = sanitize_result
+        return {
+            "successful": True,
+            "data": {
+                "export_mime_type": bridge.XLSX_MIMETYPE,
+                "file": {
+                    "mimetype": bridge.XLSX_MIMETYPE,
+                    "name": "2026 Project Review Sheet.xlsx",
+                    "s3url": download_url,
+                },
+                "size_bytes": 1024,
+            },
+        }
+
+    def fake_download(url, destination):
+        assert url == download_url
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Project Review"
+        sheet.append(["Job Number", "Estimated Hours", "Actual Hours", "Net Profit %"])
+        sheet.append(["AY-659", 379, 580.37, 0.2])
+        workbook.save(destination)
+        workbook.close()
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    monkeypatch.setattr(bridge, "_download_spreadsheet", fake_download)
+
+    result = bridge.composio_read_drive_spreadsheet("file_abc123")
+
+    assert result["name"] == "2026 Project Review Sheet.xlsx"
+    assert result["truncated"] is False
+    assert result["sheets"][0]["name"] == "Project Review"
+    assert result["sheets"][0]["rows"][1] == ["AY-659", 379, 580.37, 0.2]
+    assert seen["args"][:3] == [
+        "execute",
+        "GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE",
+        "--account",
+    ]
+    assert json.loads(seen["args"][-1]) == {
+        "fileId": "file_abc123",
+        "mimeType": bridge.XLSX_MIMETYPE,
+    }
+    assert seen["timeout"] == 180
+    assert seen["sanitize_result"] is False
+
+
+def test_spreadsheet_export_requires_xlsx_payload():
+    with pytest.raises(bridge.BridgeRequestError, match="not an exported spreadsheet"):
+        bridge._extract_spreadsheet_export(
+            {
+                "successful": True,
+                "data": {
+                    "export_mime_type": "text/csv",
+                    "file": {
+                        "mimetype": "text/csv",
+                        "name": "sheet.csv",
+                        "s3url": "https://example.com/file",
+                    },
+                },
+            }
+        )
+
+
+def test_read_drive_spreadsheet_rejects_malformed_file_id(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("Composio must not be called"),
+    )
+    with pytest.raises(bridge.BridgeRequestError, match="canonical Google Drive"):
+        bridge.composio_read_drive_spreadsheet("../bad")
+
+
 def test_pdf_reader_is_wired_into_mason_config_and_instructions():
     config = (DEPLOYMENT_ROOT / "config" / "mason-config.example.yaml").read_text(
         encoding="utf-8"
     )
     soul = (DEPLOYMENT_ROOT / "SOUL.md").read_text(encoding="utf-8")
     assert config.count("- composio_read_drive_pdf") == 1
+    assert config.count("- composio_read_drive_spreadsheet") == 1
     assert "Use `composio_read_drive_pdf`" in soul
     assert "call `vision_analyze` on every page" in soul
+    assert "Use `composio_read_drive_spreadsheet`" in soul

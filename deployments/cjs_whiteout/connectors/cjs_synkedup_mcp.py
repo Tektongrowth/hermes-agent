@@ -150,7 +150,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_operations_dashboard", "operations", "/dashboard", "Read the operations dashboard.", "operations"),
     ToolSpec("synkedup_operations_reports", "operations", "/reports", "List and read non-financial operations reports.", "operations", "/reports/{record_id}"),
     ToolSpec("synkedup_exports", "operations", "/exports", "List documented read-only exports and same-host download links.", "operations"),
-    ToolSpec("synkedup_job_costing", "financial", "/job-costing", "Read full job costing details.", "financial", "/job-costing/{record_id}"),
+    ToolSpec("synkedup_job_costing", "financial", "/job-costing", "Scan the jobs included in the current SynkedUP dashboard date range and return estimated versus actual labor, job totals, and estimated/final net profit.", "financial", "/job-costing/{record_id}"),
     ToolSpec("synkedup_margins", "financial", "/reports/margins", "Read job and company margin reports.", "financial", "/reports/margins/{record_id}"),
     ToolSpec("synkedup_invoices", "financial", "/invoices", "Read invoices without creating, editing, sending, or collecting payment.", "financial", "/invoices/{record_id}"),
     ToolSpec("synkedup_balances", "financial", "/reports/balances", "Read customer and job balances.", "financial", "/reports/balances/{record_id}"),
@@ -249,13 +249,27 @@ PROJECT_LABOR_SUMMARY_SCRIPT = r"""
   const timeRoot = document.querySelector('section.time-analysis time-analysis');
   const summary = timeRoot && timeRoot.querySelector(':scope > .ant-row');
   const columns = summary ? Array.from(summary.children).map((el) => clean(el.innerText || el.textContent)) : [];
+  const analysisText = clean(document.querySelector('#project-analysis') && document.querySelector('#project-analysis').innerText);
+  const money = '(-?\\$-?[0-9,.]+)';
+  const percent = '(-?[0-9,.]+%)';
+  const revenue = analysisText.match(new RegExp('Revenue' + money + '\\s*estimated' + money + '\\s*actual' + money + '\\s*final', 'i'));
+  const netProfit = analysisText.match(new RegExp('Net Profit' + percent + '\\s*estimated' + money + '\\s*estimated' + percent + '\\s*final' + money + '\\s*final', 'i'));
   if (number && tab && columns.length < 4) tab.click();
   return {
     ready: Boolean(number && columns.length >= 4),
     number,
     name,
     status: statusText,
-    columns
+    columns,
+    financials: {
+      estimated_total: (revenue && revenue[1]) || '',
+      actual_total: (revenue && revenue[2]) || '',
+      final_total: (revenue && revenue[3]) || '',
+      estimated_net_profit_percent: (netProfit && netProfit[1]) || '',
+      estimated_net_profit_dollars: (netProfit && netProfit[2]) || '',
+      final_net_profit_percent: (netProfit && netProfit[3]) || '',
+      final_net_profit_dollars: (netProfit && netProfit[4]) || ''
+    }
   };
 })()
 """.strip()
@@ -577,7 +591,7 @@ class SynkedUPBrowser:
         _validate_result_origin(str(page.get("url", "")), self.origin)
         return page
 
-    def labor_variance(self) -> dict[str, Any]:
+    def labor_variance(self, *, include_financial: bool = False) -> dict[str, Any]:
         dashboard_url = f"{self.base_url}/dashboard#!/"
         controller = CDPClient()
         worker = CDPClient()
@@ -619,6 +633,10 @@ class SynkedUPBrowser:
                         isinstance(value, dict)
                         and bool(value.get("ready"))
                         and str(value.get("number", "")) == expected_number
+                        and (
+                            not include_financial
+                            or bool((value.get("financials") or {}).get("final_total"))
+                        )
                     ),
                 )
                 if not isinstance(project, dict) or not project.get("ready"):
@@ -633,16 +651,32 @@ class SynkedUPBrowser:
                 if actual_hours is None or estimated_hours is None:
                     alerts.append(f"Labor hours could not be parsed for {expected_number or label}.")
                     continue
-                rows.append(
-                    [
-                        str(project.get("number", ""))[:100],
-                        str(project.get("name", ""))[:500],
-                        str(project.get("status", ""))[:100],
-                        estimated_hours,
-                        actual_hours,
-                        round(actual_hours - estimated_hours, 2),
-                    ]
-                )
+                row: list[Any] = [
+                    str(project.get("number", ""))[:100],
+                    str(project.get("name", ""))[:500],
+                    str(project.get("status", ""))[:100],
+                    estimated_hours,
+                    actual_hours,
+                    round(actual_hours - estimated_hours, 2),
+                ]
+                if include_financial:
+                    financials = project.get("financials") or {}
+                    if not financials.get("final_total"):
+                        alerts.append(
+                            f"Job totals and profit could not be read for {expected_number or label}."
+                        )
+                    row.extend(
+                        [
+                            str(financials.get("estimated_total", ""))[:100],
+                            str(financials.get("actual_total", ""))[:100],
+                            str(financials.get("final_total", ""))[:100],
+                            str(financials.get("estimated_net_profit_percent", ""))[:100],
+                            str(financials.get("estimated_net_profit_dollars", ""))[:100],
+                            str(financials.get("final_net_profit_percent", ""))[:100],
+                            str(financials.get("final_net_profit_dollars", ""))[:100],
+                        ]
+                    )
+                rows.append(row)
         finally:
             worker.close()
             if target_id:
@@ -654,9 +688,33 @@ class SynkedUPBrowser:
 
         estimated_total = round(sum(float(row[3]) for row in rows), 2)
         actual_total = round(sum(float(row[4]) for row in rows), 2)
+        headers = [
+            "Job Number",
+            "Name",
+            "Status",
+            "Estimated Hours",
+            "Actual Hours",
+            "Variance Hours",
+        ]
+        if include_financial:
+            headers.extend(
+                [
+                    "Estimated Total",
+                    "Actual Total",
+                    "Final Total",
+                    "Estimated Net Profit %",
+                    "Estimated Net Profit $",
+                    "Final Net Profit %",
+                    "Final Net Profit $",
+                ]
+            )
         return {
             "url": dashboard_url,
-            "title": "SynkedUP Dashboard Labor Variance",
+            "title": (
+                "SynkedUP Dashboard Job Costing"
+                if include_financial
+                else "SynkedUP Dashboard Labor Variance"
+            ),
             "headings": ["Jobs included in this data"],
             "alerts": alerts,
             "fields": [
@@ -669,14 +727,7 @@ class SynkedUPBrowser:
             ],
             "tables": [
                 {
-                    "headers": [
-                        "Job Number",
-                        "Name",
-                        "Status",
-                        "Estimated Hours",
-                        "Actual Hours",
-                        "Variance Hours",
-                    ],
+                    "headers": headers,
                     "rows": rows,
                 }
             ],
@@ -944,8 +995,8 @@ def _execute_read(
         _RATE_LIMITER.acquire()
         with _EXECUTION_LOCK:
             browser = SynkedUPBrowser()
-            if spec.name == "synkedup_labor_variance":
-                raw = browser.labor_variance()
+            if spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
+                raw = browser.labor_variance(include_financial=spec.name == "synkedup_job_costing")
                 if record_id:
                     for table in raw.get("tables", []):
                         table["rows"] = [
