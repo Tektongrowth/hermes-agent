@@ -763,6 +763,11 @@ def test_full_scan_cache_round_trip_is_short_lived_and_origin_bound(monkeypatch,
     fields = {field["label"]: field["value"] for field in loaded["fields"]}
     assert fields["Project detail scan source"] == "recent live scan cache"
     assert synkedup._load_full_scan_cache(
+        origin="https://app.synkedup.test",
+        include_financial=True,
+        now=captured + timedelta(minutes=30),
+    ) is not None
+    assert synkedup._load_full_scan_cache(
         origin="https://evil.test",
         include_financial=True,
         now=captured,
