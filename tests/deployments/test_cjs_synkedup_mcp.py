@@ -533,3 +533,55 @@ def test_job_costing_status_query_filters_completed_rows(monkeypatch, tmp_path):
     assert result["data"]["tables"][0]["rows"] == [
         ["AY-659", "Landscape Renovation", "Completed", "$105,000"]
     ]
+
+
+def test_dashboard_scan_navigates_back_to_dashboard_before_reading(monkeypatch):
+    instances = []
+
+    class FakeCDP:
+        def __init__(self):
+            self.navigated = []
+            instances.append(self)
+
+        def connect(self, host):
+            assert host == "app.synkedup.test"
+
+        def navigate(self, url, origin):
+            self.navigated.append((url, origin))
+            return {"url": url, "title": "Dashboard", "headings": ["Dashboard"]}
+
+        def command(self, method, params=None):
+            if method == "Target.createTarget":
+                return {"targetId": "worker-1"}
+            if method == "Target.closeTarget":
+                return {}
+            raise AssertionError(f"unexpected command: {method}")
+
+        def connect_target(self, target_id):
+            assert target_id == "worker-1"
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("CJS_SYNKEDUP_BASE_URL", "https://app.synkedup.test")
+    monkeypatch.setattr(synkedup, "CDPClient", FakeCDP)
+    monkeypatch.setattr(
+        synkedup,
+        "_wait_for_constant",
+        lambda client, expression, predicate: {
+            "ready": True,
+            "jobs": [],
+            "date_start": "2026-07-27",
+            "date_end": "2026-08-27",
+        },
+    )
+
+    result = synkedup.SynkedUPBrowser().labor_variance(include_financial=True)
+
+    assert result["tables"][0]["rows"] == []
+    assert instances[0].navigated == [
+        (
+            "https://app.synkedup.test/dashboard#!/",
+            "https://app.synkedup.test",
+        )
+    ]

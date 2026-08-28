@@ -601,6 +601,9 @@ class SynkedUPBrowser:
         rows: list[list[Any]] = []
         try:
             controller.connect(self.host)
+            dashboard_page = controller.navigate(dashboard_url, self.origin)
+            if _looks_logged_out(dashboard_page):
+                raise ReauthenticationRequired("authenticated SynkedUP session is required")
             dashboard = _wait_for_constant(
                 controller,
                 DASHBOARD_LABOR_JOBS_SCRIPT,
