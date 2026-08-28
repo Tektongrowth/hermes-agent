@@ -846,10 +846,8 @@ class SynkedUPBrowser:
                 expected_number = label.split(":", 1)[0].strip() if label else ""
                 _validate_dashboard_project_url(href, self.origin)
                 worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
-                project = _wait_for_constant(
-                    worker,
-                    PROJECT_LABOR_SUMMARY_SCRIPT,
-                    lambda value: (
+                def project_ready(value: Any) -> bool:
+                    return (
                         isinstance(value, dict)
                         and bool(value.get("ready"))
                         and (
@@ -860,8 +858,20 @@ class SynkedUPBrowser:
                             not include_financial
                             or bool((value.get("financials") or {}).get("final_total"))
                         )
-                    ),
+                    )
+
+                project = _wait_for_constant(
+                    worker,
+                    PROJECT_LABOR_SUMMARY_SCRIPT,
+                    project_ready,
                 )
+                if not project_ready(project):
+                    worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
+                    project = _wait_for_constant(
+                        worker,
+                        PROJECT_LABOR_SUMMARY_SCRIPT,
+                        project_ready,
+                    )
                 if not isinstance(project, dict) or not project.get("ready"):
                     alerts.append(f"Labor hours could not be read for {expected_number or label}.")
                     continue

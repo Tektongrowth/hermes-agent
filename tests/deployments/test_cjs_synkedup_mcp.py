@@ -819,3 +819,82 @@ def test_browser_returns_full_scan_cache_without_connecting_to_cdp(monkeypatch, 
     monkeypatch.setattr(synkedup, "CDPClient", FailIfConstructed)
     loaded = synkedup.SynkedUPBrowser().labor_variance()
     assert loaded["tables"] == result["tables"]
+
+
+def test_financial_scan_retries_project_when_costing_fields_are_late(monkeypatch, tmp_path):
+    monkeypatch.setenv("CJS_SYNKEDUP_BASE_URL", "https://app.synkedup.test")
+    monkeypatch.setenv(
+        "CJS_SYNKEDUP_DASHBOARD_CACHE_PATH",
+        str(tmp_path / "dashboard-jobs.json"),
+    )
+    navigations = []
+    project_reads = 0
+
+    class FakeCDP:
+        def connect(self, host):
+            assert host == "app.synkedup.test"
+
+        def navigate(self, url, origin):
+            return {"url": url, "title": "Dashboard", "headings": ["Dashboard"]}
+
+        def command(self, method, params=None):
+            if method == "Target.createTarget":
+                return {"targetId": "worker-1"}
+            if method == "Page.navigate":
+                navigations.append(params["url"])
+                return {}
+            if method == "Target.closeTarget":
+                return {}
+            raise AssertionError(f"unexpected command: {method}")
+
+        def connect_target(self, target_id):
+            assert target_id == "worker-1"
+
+        def close(self):
+            return None
+
+    def fake_wait(client, expression, predicate):
+        nonlocal project_reads
+        if expression == synkedup.DASHBOARD_LABOR_JOBS_SCRIPT:
+            return {
+                "ready": True,
+                "date_start": "2026-07-27",
+                "date_end": "2026-08-27",
+                "jobs": [
+                    {
+                        "label": "AY-659: Landscape Renovation",
+                        "href": "https://app.synkedup.test/#!/projects/466093-landscape-renovation",
+                    }
+                ],
+            }
+        project_reads += 1
+        project = {
+            "ready": True,
+            "number": "AY-659",
+            "name": "Landscape Renovation",
+            "status": "Completed",
+            "columns": ["Labor", "12h", "Variance", "10h"],
+            "financials": {},
+        }
+        if project_reads == 2:
+            project["financials"] = {
+                "estimated_total": "$10,000.00",
+                "actual_total": "$9,000.00",
+                "final_total": "$9,500.00",
+                "estimated_net_profit_percent": "30.00%",
+                "estimated_net_profit_dollars": "$3,000.00",
+                "final_net_profit_percent": "25.00%",
+                "final_net_profit_dollars": "$2,375.00",
+            }
+        return project
+
+    monkeypatch.setattr(synkedup, "CDPClient", FakeCDP)
+    monkeypatch.setattr(synkedup, "_wait_for_constant", fake_wait)
+
+    result = synkedup.SynkedUPBrowser().labor_variance(include_financial=True)
+
+    assert project_reads == 2
+    assert len(navigations) == 2
+    assert result["tables"][0]["rows"][0][8] == "$9,500.00"
+    assert not any("could not be read" in alert for alert in result["alerts"])
+    assert (tmp_path / "job-costing.json").is_file()
