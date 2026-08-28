@@ -22,7 +22,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 import websocket
 from mcp.server.fastmcp import FastMCP
@@ -142,7 +142,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_job_documents", "operations", "/jobs", "List read-only job PDFs and downloadable documents.", "operations", "/jobs/{record_id}/documents"),
     ToolSpec("synkedup_time_entries", "operations", "/time", "Read timesheets and time entries.", "operations", "/time/{record_id}"),
     ToolSpec("synkedup_clock_status", "operations", "/time/clock-status", "Read current clock status without clocking anyone in or out.", "operations"),
-    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Compare estimated and actual labor hours without payroll or labor cost fields.", "operations", "/reports/labor-hours/{record_id}"),
+    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Scan the jobs included in the current SynkedUP dashboard date range and compare estimated versus actual labor hours without payroll or labor cost fields.", "operations", "/reports/labor-hours/{record_id}"),
     ToolSpec("synkedup_materials", "operations", "/materials", "Read material quantities and fulfillment state without costs.", "operations", "/materials/{record_id}"),
     ToolSpec("synkedup_equipment", "operations", "/equipment", "Read equipment assigned to work.", "operations", "/equipment/{record_id}"),
     ToolSpec("synkedup_subcontractors", "operations", "/subcontractors", "Read subcontractor assignments without payment fields.", "operations", "/subcontractors/{record_id}"),
@@ -214,6 +214,49 @@ EXTRACT_PAGE_SCRIPT = r"""
   const alerts = Array.from(document.querySelectorAll('[role="alert"],.alert,.error,.empty-state'))
     .filter(visible).map(text).filter(Boolean).slice(0, 20);
   return {url: location.href, title: document.title, headings, tables, fields, cards, links, alerts};
+})()
+""".strip()
+DASHBOARD_LABOR_JOBS_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const headers = Array.from(document.querySelectorAll('.ant-collapse-header-text'));
+  const label = headers.find((el) => clean(el.innerText || el.textContent) === 'Jobs included in this data:');
+  const header = label && label.closest('[role="button"]');
+  if (!header) return {ready: false, jobs: []};
+  if (header.getAttribute('aria-expanded') !== 'true') header.click();
+  const container = header.closest('.ant-collapse-item');
+  const jobs = Array.from((container && container.querySelectorAll('a[href]')) || []).map((link) => {
+    const url = new URL(link.href, location.href);
+    return {label: clean(link.innerText || link.textContent), href: url.href};
+  }).filter((job) => job.label && job.href);
+  const dates = Array.from(document.querySelectorAll('.main-dashboard input[date-range]')).map((input) => clean(input.value));
+  return {
+    ready: jobs.length > 0,
+    date_start: dates[0] || '',
+    date_end: dates[1] || '',
+    jobs
+  };
+})()
+""".strip()
+PROJECT_LABOR_SUMMARY_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const number = clean(document.querySelector('#no') && document.querySelector('#no').value);
+  const name = clean(document.querySelector('#name') && document.querySelector('#name').value);
+  const status = document.querySelector('#project-status');
+  const statusText = clean(status && status.selectedOptions && status.selectedOptions[0] && status.selectedOptions[0].text);
+  const tab = document.querySelector('[data-target="#tab-analysis"]');
+  const timeRoot = document.querySelector('section.time-analysis time-analysis');
+  const summary = timeRoot && timeRoot.querySelector(':scope > .ant-row');
+  const columns = summary ? Array.from(summary.children).map((el) => clean(el.innerText || el.textContent)) : [];
+  if (number && tab && columns.length < 4) tab.click();
+  return {
+    ready: Boolean(number && columns.length >= 4),
+    number,
+    name,
+    status: statusText,
+    columns
+  };
 })()
 """.strip()
 READY_STATE_SCRIPT = "document.readyState"
@@ -331,18 +374,9 @@ class CDPClient:
             raise RuntimeError("invalid CDP target response")
         return [item for item in payload if isinstance(item, dict)]
 
-    def connect(self, expected_host: str) -> None:
-        targets = [item for item in self._json_targets() if item.get("type") == "page"]
-        matching = []
-        for target in targets:
-            try:
-                if urllib.parse.urlsplit(str(target.get("url", ""))).hostname == expected_host:
-                    matching.append(target)
-            except ValueError:
-                continue
-        target = matching[0] if matching else (targets[0] if targets else None)
-        if not target or not isinstance(target.get("webSocketDebuggerUrl"), str):
-            raise RuntimeError("no browser page target available")
+    def _connect_page_target(self, target: dict[str, Any]) -> None:
+        if not isinstance(target.get("webSocketDebuggerUrl"), str):
+            raise RuntimeError("browser page target is unavailable")
         self._socket = websocket.create_connection(
             target["webSocketDebuggerUrl"],
             timeout=self.timeout,
@@ -353,6 +387,40 @@ class CDPClient:
         # Business-data mutations are blocked even if a page script, extension,
         # or compromised response attempts one while a tool call is active.
         self.command("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+
+    def connect(self, expected_host: str) -> None:
+        targets = [item for item in self._json_targets() if item.get("type") == "page"]
+        matching = []
+        for target in targets:
+            try:
+                if urllib.parse.urlsplit(str(target.get("url", ""))).hostname == expected_host:
+                    matching.append(target)
+            except ValueError:
+                continue
+        matching.sort(
+            key=lambda item: (
+                0
+                if urllib.parse.urlsplit(str(item.get("url", ""))).path in {"", "/", "/dashboard"}
+                else 1
+            )
+        )
+        target = matching[0] if matching else (targets[0] if targets else None)
+        if not target:
+            raise RuntimeError("no browser page target available")
+        self._connect_page_target(target)
+
+    def connect_target(self, target_id: str) -> None:
+        target = next(
+            (
+                item
+                for item in self._json_targets()
+                if item.get("type") == "page" and str(item.get("id", "")) == str(target_id)
+            ),
+            None,
+        )
+        if not target:
+            raise RuntimeError("requested browser page target is unavailable")
+        self._connect_page_target(target)
 
     def close(self) -> None:
         if self._socket is not None:
@@ -410,7 +478,13 @@ class CDPClient:
         raise TimeoutError("CDP command timed out")
 
     def evaluate_constant(self, expression: str) -> Any:
-        if expression not in {EXTRACT_PAGE_SCRIPT, READY_STATE_SCRIPT, LOCATION_SCRIPT}:
+        if expression not in {
+            EXTRACT_PAGE_SCRIPT,
+            DASHBOARD_LABOR_JOBS_SCRIPT,
+            PROJECT_LABOR_SUMMARY_SCRIPT,
+            READY_STATE_SCRIPT,
+            LOCATION_SCRIPT,
+        }:
             raise SecurityViolation("runtime expression is not allowlisted")
         result = self.command(
             "Runtime.evaluate",
@@ -442,6 +516,30 @@ class CDPClient:
         return page
 
 
+def _wait_for_constant(
+    client: CDPClient,
+    expression: str,
+    predicate: Callable[[Any], bool],
+    *,
+    timeout: float = 25.0,
+) -> Any:
+    deadline = time.monotonic() + timeout
+    last: Any = None
+    while time.monotonic() < deadline:
+        last = client.evaluate_constant(expression)
+        if predicate(last):
+            return last
+        time.sleep(0.25)
+    return last
+
+
+def _hours_value(value: Any) -> float | None:
+    match = re.search(r"-?[0-9][0-9,]*(?:\.[0-9]+)?", str(value or ""))
+    if not match:
+        return None
+    return float(match.group(0).replace(",", ""))
+
+
 class SynkedUPBrowser:
     def __init__(self):
         self.base_url = os.getenv("CJS_SYNKEDUP_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -455,16 +553,136 @@ class SynkedUPBrowser:
             route = spec.detail_route.format(record_id=urllib.parse.quote(record_id, safe=""))
         url = urllib.parse.urljoin(self.base_url + "/", route.lstrip("/"))
         _validate_navigation_url(url, self.origin)
-        client = CDPClient()
+        controller = CDPClient()
+        worker = CDPClient()
+        target_id = ""
         try:
-            client.connect(self.host)
-            page = client.navigate(url, self.origin)
+            controller.connect(self.host)
+            created = controller.command("Target.createTarget", {"url": "about:blank", "background": True})
+            target_id = str(created.get("targetId", ""))
+            if not target_id:
+                raise RuntimeError("could not create isolated browser read target")
+            worker.connect_target(target_id)
+            page = worker.navigate(url, self.origin)
         finally:
-            client.close()
+            worker.close()
+            if target_id:
+                try:
+                    controller.command("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    pass
+            controller.close()
         if _looks_logged_out(page):
             raise ReauthenticationRequired("authenticated SynkedUP session is required")
         _validate_result_origin(str(page.get("url", "")), self.origin)
         return page
+
+    def labor_variance(self) -> dict[str, Any]:
+        dashboard_url = f"{self.base_url}/dashboard#!/"
+        controller = CDPClient()
+        worker = CDPClient()
+        target_id = ""
+        dashboard: dict[str, Any] = {}
+        alerts: list[str] = []
+        rows: list[list[Any]] = []
+        try:
+            controller.connect(self.host)
+            dashboard = _wait_for_constant(
+                controller,
+                DASHBOARD_LABOR_JOBS_SCRIPT,
+                lambda value: isinstance(value, dict) and bool(value.get("ready")),
+            )
+            if not isinstance(dashboard, dict) or not dashboard.get("ready"):
+                page = controller.evaluate_constant(EXTRACT_PAGE_SCRIPT)
+                if isinstance(page, dict) and _looks_logged_out(page):
+                    raise ReauthenticationRequired("authenticated SynkedUP session is required")
+                raise RuntimeError("dashboard labor job list did not load")
+
+            jobs = dashboard.get("jobs") or []
+            created = controller.command("Target.createTarget", {"url": "about:blank", "background": True})
+            target_id = str(created.get("targetId", ""))
+            if not target_id:
+                raise RuntimeError("could not create isolated browser read target")
+            worker.connect_target(target_id)
+            for job in jobs[:MAX_RESULT_ROWS]:
+                if not isinstance(job, dict):
+                    continue
+                label = str(job.get("label", ""))[:500]
+                href = str(job.get("href", ""))
+                expected_number = label.split(":", 1)[0].strip()
+                _validate_dashboard_project_url(href, self.origin)
+                worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
+                project = _wait_for_constant(
+                    worker,
+                    PROJECT_LABOR_SUMMARY_SCRIPT,
+                    lambda value: (
+                        isinstance(value, dict)
+                        and bool(value.get("ready"))
+                        and str(value.get("number", "")) == expected_number
+                    ),
+                )
+                if not isinstance(project, dict) or not project.get("ready"):
+                    alerts.append(f"Labor hours could not be read for {expected_number or label}.")
+                    continue
+                columns = project.get("columns") or []
+                if len(columns) < 4:
+                    alerts.append(f"Labor hours could not be read for {expected_number or label}.")
+                    continue
+                actual_hours = _hours_value(columns[1])
+                estimated_hours = _hours_value(columns[-1])
+                if actual_hours is None or estimated_hours is None:
+                    alerts.append(f"Labor hours could not be parsed for {expected_number or label}.")
+                    continue
+                rows.append(
+                    [
+                        str(project.get("number", ""))[:100],
+                        str(project.get("name", ""))[:500],
+                        str(project.get("status", ""))[:100],
+                        estimated_hours,
+                        actual_hours,
+                        round(actual_hours - estimated_hours, 2),
+                    ]
+                )
+        finally:
+            worker.close()
+            if target_id:
+                try:
+                    controller.command("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    pass
+            controller.close()
+
+        estimated_total = round(sum(float(row[3]) for row in rows), 2)
+        actual_total = round(sum(float(row[4]) for row in rows), 2)
+        return {
+            "url": dashboard_url,
+            "title": "SynkedUP Dashboard Labor Variance",
+            "headings": ["Jobs included in this data"],
+            "alerts": alerts,
+            "fields": [
+                {"label": "Dashboard start date", "value": str(dashboard.get("date_start", ""))},
+                {"label": "Dashboard end date", "value": str(dashboard.get("date_end", ""))},
+                {"label": "Jobs scanned", "value": len(rows)},
+                {"label": "Estimated labor hours", "value": estimated_total},
+                {"label": "Actual labor hours", "value": actual_total},
+                {"label": "Labor variance hours", "value": round(actual_total - estimated_total, 2)},
+            ],
+            "tables": [
+                {
+                    "headers": [
+                        "Job Number",
+                        "Name",
+                        "Status",
+                        "Estimated Hours",
+                        "Actual Hours",
+                        "Variance Hours",
+                    ],
+                    "rows": rows,
+                }
+            ],
+            "cards": [],
+            "links": [],
+        }
 
     def status(self) -> dict[str, Any]:
         client = CDPClient()
@@ -510,6 +728,20 @@ def _validate_navigation_url(value: str, expected_origin: str) -> None:
         raise SecurityViolation("mutation navigation refused")
     if parsed.fragment:
         raise SecurityViolation("fragment navigation refused")
+
+
+def _validate_dashboard_project_url(value: str, expected_origin: str) -> None:
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        f"{parsed.scheme}://{parsed.netloc}" != expected_origin
+        or parsed.username
+        or parsed.password
+        or parsed.path != "/"
+        or parsed.query
+        or not re.fullmatch(r"!/projects/[0-9]{1,12}-[a-z0-9-]{1,160}", parsed.fragment)
+    ):
+        raise SecurityViolation("dashboard project link refused")
+
 
 
 def _validate_result_origin(value: str, expected_origin: str) -> None:
@@ -711,7 +943,16 @@ def _execute_read(
             raise ValueError("start_date must be on or before end_date")
         _RATE_LIMITER.acquire()
         with _EXECUTION_LOCK:
-            raw = SynkedUPBrowser().read(spec, record_id=record_id)
+            browser = SynkedUPBrowser()
+            if spec.name == "synkedup_labor_variance":
+                raw = browser.labor_variance()
+                if record_id:
+                    for table in raw.get("tables", []):
+                        table["rows"] = [
+                            row for row in table.get("rows", []) if row and str(row[0]) == record_id
+                        ]
+            else:
+                raw = browser.read(spec, record_id=record_id)
         filtered = _filter_page(raw, spec.access_class)
         filtered = _local_filter(
             filtered,

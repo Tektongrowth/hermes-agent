@@ -351,6 +351,72 @@ def test_local_filters_apply_query_dates_and_cursor():
     assert result["tables"][0]["rows"] == [["MS-003 Beta", "2026-03-01"]]
 
 
+def test_dashboard_project_links_are_same_origin_bounded_hash_routes():
+    origin = "https://app.synkedup.test"
+    synkedup._validate_dashboard_project_url(
+        "https://app.synkedup.test/#!/projects/497695-outcropping-wall",
+        origin,
+    )
+    for url in (
+        "https://evil.test/#!/projects/497695-outcropping-wall",
+        "https://app.synkedup.test/#!/projects/new",
+        "https://app.synkedup.test/#!/projects/497695-outcropping-wall/edit",
+        "https://app.synkedup.test/?next=evil#!/projects/497695-outcropping-wall",
+    ):
+        with pytest.raises(synkedup.SecurityViolation):
+            synkedup._validate_dashboard_project_url(url, origin)
+
+
+def test_labor_variance_uses_dashboard_scan_and_filters_record_id(monkeypatch, tmp_path):
+    raw = {
+        "url": "https://app.synkedup.test/dashboard#!/",
+        "title": "SynkedUP Dashboard Labor Variance",
+        "headings": ["Jobs included in this data"],
+        "alerts": [],
+        "fields": [],
+        "tables": [
+            {
+                "headers": ["Job Number", "Name", "Status", "Estimated Hours", "Actual Hours", "Variance Hours"],
+                "rows": [
+                    ["AY-659", "Landscape Renovation", "Completed", 379.0, 580.37, 201.37],
+                    ["AY-741", "Landscape Design", "Completed", 221.0, 153.63, -67.37],
+                ],
+            }
+        ],
+        "cards": [],
+        "links": [],
+    }
+
+    class FakeBrowser:
+        def labor_variance(self):
+            return json.loads(json.dumps(raw))
+
+        def read(self, spec, *, record_id=""):
+            raise AssertionError("generic page read must not be used for labor variance")
+
+    monkeypatch.setattr(synkedup, "SynkedUPBrowser", FakeBrowser)
+    monkeypatch.setattr(synkedup, "_AUDIT", synkedup.AuditLogger(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(synkedup._RATE_LIMITER, "acquire", lambda: None)
+    result = synkedup._execute_read(
+        synkedup.TOOL_SPEC_BY_NAME["synkedup_labor_variance"],
+        record_id="AY-741",
+    )
+    assert result["ok"] is True
+    assert result["data"]["tables"][0]["rows"] == [
+        ["AY-741", "Landscape Design", "Completed", "221.0", "153.63", "-67.37"]
+    ]
+    encoded = json.dumps(result).casefold()
+    assert "actual hours" in encoded
+    assert "actual cost" not in encoded
+
+
+def test_hours_value_parses_dashboard_hour_labels():
+    assert synkedup._hours_value("1,182.17h") == 1182.17
+    assert synkedup._hours_value("0h") == 0.0
+    assert synkedup._hours_value(36.5) == 36.5
+    assert synkedup._hours_value("") is None
+
+
 def test_financial_tools_never_appear_in_operations_toolset():
     operations = set(synkedup.TOOL_NAMES_BY_ACCESS_CLASS["operations"])
     financial = set(synkedup.TOOL_NAMES_BY_ACCESS_CLASS["financial"])
