@@ -12,6 +12,10 @@ from .store import MemoryPortalStore, StoreConflict
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_SECRETISH_PURPOSE_RE = re.compile(
+    r"(?:password|passcode|token|secret|api[ _-]?key)\s*[:=]",
+    re.IGNORECASE,
+)
 _COOKIE_NAME = "portal_session"
 
 
@@ -34,6 +38,16 @@ class PortalStore(Protocol):
         session_id: str,
         slot_id: str,
         metadata: Mapping[str, Any],
+    ) -> None: ...
+
+    def add_card(
+        self,
+        *,
+        tenant_id: str,
+        invitation_id: str,
+        session_id: str,
+        card_id: str,
+        card: Mapping[str, Any],
     ) -> None: ...
 
     def complete_invitation(
@@ -139,6 +153,74 @@ class PortalApp:
             },
         )
 
+    def issue_workbench_invitation(
+        self,
+        *,
+        tenant_id: str,
+        recipient_email: str,
+        catalog_slots: Sequence[str],
+        initial_cards: Sequence[Mapping[str, str]],
+        ttl_seconds: int,
+    ) -> str:
+        tenant = get_tenant(tenant_id)
+        recipient = _normalize_email(recipient_email)
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        allowed_slots = list(dict.fromkeys(catalog_slots))
+        if not allowed_slots:
+            raise ValueError("at least one catalog slot is required")
+        for slot_id in allowed_slots:
+            tenant.get_slot(slot_id)
+        if not initial_cards:
+            raise ValueError("at least one initial card is required")
+
+        issued_at = int(self.now())
+        invitation_id = self.id_factory()
+        cards: dict[str, dict[str, str]] = {}
+        card_ids: list[str] = []
+        for requested in initial_cards:
+            slot_id = str(requested.get("slot_id", ""))
+            if slot_id not in allowed_slots:
+                raise ValueError("initial card is not in the connector catalog")
+            slot = tenant.get_slot(slot_id)
+            purpose = _normalize_purpose(str(requested.get("purpose", "")))
+            expected = str(requested.get("expected_identity", "")).strip()
+            card: dict[str, str] = {"slot_id": slot_id, "purpose": purpose}
+            if expected:
+                if not slot.uses_oauth:
+                    raise ValueError("account locks are available only for OAuth cards")
+                card["expected_identity"] = _normalize_email(expected)
+            card_id = self.id_factory()
+            card_ids.append(card_id)
+            cards[card_id] = card
+
+        record = {
+            "tenant_id": tenant_id,
+            "invitation_id": invitation_id,
+            "recipient_email": recipient,
+            "mode": "workbench",
+            "catalog_slots": allowed_slots,
+            "slots": card_ids,
+            "cards": cards,
+            "expected_identities": {},
+            "connections": {},
+            "status": "pending",
+            "session_id": None,
+            "issued_at": issued_at,
+            "expires_at": issued_at + int(ttl_seconds),
+        }
+        self.store.create_invitation(record)
+        return self.signer.issue(
+            purpose="invitation",
+            ttl_seconds=ttl_seconds,
+            claims={
+                "tenant_id": tenant_id,
+                "invitation_id": invitation_id,
+                "recipient_email": recipient,
+                "slots": card_ids,
+            },
+        )
+
     def handle(self, request: Request) -> Response:
         method = request.method.upper()
         path = request.path
@@ -151,6 +233,8 @@ class PortalApp:
             if not self.test_mode:
                 return self._not_found()
             return self._test_connect(request)
+        if method == "POST" and path == "/workbench/cards":
+            return self._add_workbench_card(request)
         if method == "POST" and path == "/complete":
             return self._complete(request)
         if self.test_mode and (
@@ -219,61 +303,152 @@ class PortalApp:
         record, claims = session
         csrf = self._issue_csrf(record, claims)
         tenant = get_tenant(str(record["tenant_id"]))
+        is_workbench = record.get("mode") == "workbench"
         slot_cards: list[str] = []
         connections = record.get("connections", {})
-        for slot_id in record["slots"]:
+        for card_id in record["slots"]:
+            if is_workbench:
+                card = record.get("cards", {}).get(card_id, {})
+                slot_id = str(card.get("slot_id", ""))
+                purpose = str(card.get("purpose", ""))
+                expected = str(card.get("expected_identity", ""))
+            else:
+                slot_id = str(card_id)
+                purpose = ""
+                expected = str(record.get("expected_identities", {}).get(slot_id, ""))
             slot = tenant.get_slot(slot_id)
-            connection = connections.get(slot_id)
+            connection = connections.get(card_id)
             status = "Connected" if connection else "Not connected"
             identity = ""
             if connection and connection.get("connected_email"):
-                identity = f"<small>{html.escape(str(connection['connected_email']))}</small>"
+                identity = (
+                    '<p class="connected-as">Connected as '
+                    f"<strong>{html.escape(str(connection['connected_email']))}</strong></p>"
+                )
+            purpose_html = (
+                f'<p class="purpose">For: {html.escape(purpose)}</p>' if purpose else ""
+            )
             if self.test_mode:
                 if slot.provider is ProviderKind.YETI:
                     fields = (
                         '<label>Username<input name="username" autocomplete="off"></label>'
                         '<label>Password<input name="password" type="password" autocomplete="new-password"></label>'
+                        '<p class="security-note">This test discards both values. The live portal writes them once to the fixed CJS AWS secret.</p>'
                     )
-                elif slot.provider is ProviderKind.MICROSOFT:
-                    expected = record.get("expected_identities", {}).get(slot_id, "")
-                    fields = (
-                        '<label>Outlook email address'
-                        f'<input name="connected_email" type="email" autocomplete="email" value="{html.escape(str(expected))}"></label>'
-                        '<p class="security-note">Your password stays with Microsoft. '
-                        'You will enter it only on Microsoft’s official sign-in page when the live connection is enabled.</p>'
-                    )
+                    button_label = "Save approved login"
                 else:
-                    expected = record.get("expected_identities", {}).get(slot_id, "")
+                    account_label = {
+                        ProviderKind.MICROSOFT: "Outlook email address",
+                        ProviderKind.GOOGLE: "Google account email",
+                        ProviderKind.INTUIT: "QuickBooks account email",
+                    }.get(slot.provider, "Connected account email")
                     fields = (
-                        '<label>Simulated connected email'
-                        f'<input name="connected_email" type="email" value="{html.escape(str(expected))}"></label>'
+                        f'<label>{html.escape(account_label)}'
+                        f'<input name="connected_email" type="email" autocomplete="email" value="{html.escape(expected)}"></label>'
                     )
+                    if slot.provider is ProviderKind.MICROSOFT:
+                        fields += (
+                            '<p class="security-note">Your Microsoft password stays with Microsoft. '
+                            'You will enter it only on Microsoft’s official sign-in page when the live connection is enabled.</p>'
+                        )
+                    elif slot.provider is ProviderKind.GOOGLE:
+                        fields += (
+                            '<p class="security-note">Your Google password stays with Google. '
+                            'You will enter it only on Google’s official sign-in page when the live connection is enabled.</p>'
+                        )
+                    else:
+                        fields += (
+                            '<p class="security-note">Your QuickBooks password stays with Intuit. '
+                            'You will enter it only on Intuit’s official sign-in page when the live connection is enabled.</p>'
+                        )
+                    button_label = "Run safe connection test"
+                identifier_field = "card" if is_workbench else "slot"
                 action = (
-                    f'<form method="post" action="/test/connect">'
+                    '<form method="post" action="/test/connect">'
                     f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
-                    f'<input type="hidden" name="slot" value="{html.escape(slot_id)}">'
-                    f"{fields}<button type=\"submit\">Run safe test</button></form>"
+                    f'<input type="hidden" name="{identifier_field}" value="{html.escape(str(card_id))}">'
+                    f"{fields}<button type=\"submit\">{button_label}</button></form>"
                 )
             else:
                 action = "<p>Production connection is not enabled in this build.</p>"
             slot_cards.append(
-                '<section class="card">'
+                f'<section class="card" data-card-id="{html.escape(str(card_id))}">'
                 f"<div><p class=\"eyebrow\">{html.escape(slot.provider.value)}</p>"
-                f"<h2>{html.escape(slot.label)}</h2><p class=\"status\">{status}</p>{identity}</div>"
+                f"<h2>{html.escape(slot.label)}</h2>{purpose_html}"
+                f"<p class=\"status\">{status}</p>{identity}</div>"
                 f"{action}</section>"
+            )
+
+        workbench_add = ""
+        if is_workbench:
+            options = "".join(
+                f'<option value="{html.escape(slot_id)}">{html.escape(tenant.get_slot(slot_id).label)}</option>'
+                for slot_id in record.get("catalog_slots", [])
+            )
+            workbench_add = (
+                '<section class="add-panel"><div><p class="eyebrow">Connection catalog</p>'
+                '<h2>Add another connection</h2><p class="security-note">Choose an approved system and describe what the account is for. Storage destinations and OAuth scopes stay fixed on the server.</p></div>'
+                '<form method="post" action="/workbench/cards">'
+                f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
+                f'<label>System<select name="slot">{options}</select></label>'
+                '<label>Purpose or account label<input name="purpose" maxlength="120" autocomplete="off" placeholder="Example: CJS office inbox"></label>'
+                '<label>Optional OAuth account lock<input name="expected_identity" type="email" autocomplete="off" placeholder="Leave blank to confirm the account after sign-in"></label>'
+                '<button type="submit">Add connection card</button></form></section>'
             )
 
         all_connected = set(record.get("connections", {})) == set(record["slots"])
         complete_disabled = "" if all_connected else " disabled"
+        mode_intro = (
+            "Add each account needed for this client. OAuth passwords stay on the provider’s official sign-in page."
+            if is_workbench
+            else "Complete each requested connection below."
+        )
         body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(tenant.display_name)} connection setup</title><style>{_CSS}</style></head>
-<body><main><header><p class="kicker">Secure connection room</p><h1>Connect {html.escape(tenant.display_name)}</h1>
-<p class="intro">This invitation is for <strong>{html.escape(str(record['recipient_email']))}</strong>. Test mode never contacts a provider or saves a credential.</p></header>
-<div class="grid">{''.join(slot_cards)}</div>
+<body><main><header><p class="kicker">Secure connection workbench</p><h1>Connect {html.escape(tenant.display_name)}</h1>
+<p class="intro">Signed in for <strong>{html.escape(str(record['recipient_email']))}</strong>. {html.escape(mode_intro)} Test mode contacts no provider and saves no credential.</p></header>
+<div class="grid">{''.join(slot_cards)}</div>{workbench_add}
 <form method="post" action="/complete" class="complete"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button type="submit"{complete_disabled}>Finish setup</button></form>
 <footer>Tenant-isolated AWS test environment · read-only connection design</footer></main></body></html>"""
         return self._response(200, body)
+
+    def _add_workbench_card(self, request: Request) -> Response:
+        session = self._load_session(request)
+        if session is None:
+            return self._response(410, _message_page("This setup session is unavailable."))
+        record, claims = session
+        if record.get("mode") != "workbench":
+            return self._not_found()
+        if not self._valid_csrf(request.form.get("csrf", ""), record, claims):
+            return self._response(403, _message_page("The form expired. Reload and try again."))
+        allowed_fields = {"csrf", "slot", "purpose", "expected_identity"}
+        if set(request.form) - allowed_fields:
+            return self._response(400, _message_page("Unsupported connection settings were rejected."))
+
+        slot_id = request.form.get("slot", "")
+        if slot_id not in record.get("catalog_slots", []):
+            return self._not_found()
+        try:
+            slot = get_tenant(str(record["tenant_id"])).get_slot(slot_id)
+            purpose = _normalize_purpose(request.form.get("purpose", ""))
+            expected = request.form.get("expected_identity", "").strip()
+            card: dict[str, str] = {"slot_id": slot_id, "purpose": purpose}
+            if expected:
+                if not slot.uses_oauth:
+                    raise ValueError("account locks require OAuth")
+                card["expected_identity"] = _normalize_email(expected)
+            card_id = self.id_factory()
+            self.store.add_card(
+                tenant_id=str(record["tenant_id"]),
+                invitation_id=str(record["invitation_id"]),
+                session_id=str(claims["session_id"]),
+                card_id=card_id,
+                card=card,
+            )
+        except (RegistryError, StoreConflict, ValueError):
+            return self._response(400, _message_page("The connection card could not be added."))
+        return self._response(303, "", extra_headers={"Location": "/setup"})
 
     def _test_connect(self, request: Request) -> Response:
         session = self._load_session(request)
@@ -282,9 +457,25 @@ class PortalApp:
         record, claims = session
         if not self._valid_csrf(request.form.get("csrf", ""), record, claims):
             return self._response(403, _message_page("The form expired. Reload and try again."))
-        slot_id = request.form.get("slot", "")
-        if slot_id not in record.get("slots", []):
-            return self._not_found()
+
+        is_workbench = record.get("mode") == "workbench"
+        if is_workbench:
+            card_id = request.form.get("card", "")
+            if card_id not in record.get("slots", []):
+                return self._not_found()
+            card = record.get("cards", {}).get(card_id)
+            if not isinstance(card, dict):
+                return self._not_found()
+            slot_id = str(card.get("slot_id", ""))
+            expected = str(card.get("expected_identity", ""))
+            purpose = str(card.get("purpose", ""))
+        else:
+            slot_id = request.form.get("slot", "")
+            card_id = slot_id
+            expected = str(record.get("expected_identities", {}).get(slot_id, ""))
+            purpose = ""
+            if slot_id not in record.get("slots", []):
+                return self._not_found()
         try:
             slot = get_tenant(str(record["tenant_id"])).get_slot(slot_id)
         except RegistryError:
@@ -293,6 +484,8 @@ class PortalApp:
         metadata: dict[str, Any] = {
             "status": "connected",
             "provider": slot.provider.value,
+            "connector_slot": slot_id,
+            "purpose": purpose,
             "simulated": True,
             "connected_at": int(self.now()),
         }
@@ -300,17 +493,17 @@ class PortalApp:
             try:
                 connected_email = _normalize_email(request.form.get("connected_email", ""))
             except ValueError:
-                return self._response(409, _message_page("The connected account does not match this invitation."))
-            expected = record.get("expected_identities", {}).get(slot_id)
-            if connected_email != expected:
-                return self._response(409, _message_page("The connected account does not match this invitation."))
+                return self._response(409, _message_page("Enter the account used for this connection."))
+            if expected and connected_email != expected:
+                return self._response(409, _message_page("The connected account does not match this card’s account lock."))
             metadata["connected_email"] = connected_email
+            metadata["identity_policy"] = "locked" if expected else "record_after_sign_in"
         try:
             self.store.save_connection(
                 tenant_id=str(record["tenant_id"]),
                 invitation_id=str(record["invitation_id"]),
                 session_id=str(claims["session_id"]),
-                slot_id=slot_id,
+                slot_id=card_id,
                 metadata=metadata,
             )
         except StoreConflict:
@@ -423,6 +616,15 @@ def _normalize_email(value: str) -> str:
     normalized = value.strip().casefold()
     if not _EMAIL_RE.fullmatch(normalized):
         raise ValueError("invalid email")
+    return normalized
+
+
+def _normalize_purpose(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not 2 <= len(normalized) <= 120:
+        raise ValueError("purpose must be 2 to 120 characters")
+    if _SECRETISH_PURPOSE_RE.search(normalized):
+        raise ValueError("purpose must not contain a credential value")
     return normalized
 
 

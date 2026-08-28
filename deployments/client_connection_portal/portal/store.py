@@ -57,6 +57,32 @@ class MemoryPortalStore:
             item["claimed_at"] = int(self._now())
             return copy.deepcopy(item)
 
+    def add_card(
+        self,
+        *,
+        tenant_id: str,
+        invitation_id: str,
+        session_id: str,
+        card_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        key = self.invitation_key(tenant_id, invitation_id)
+        with self._lock:
+            item = self._items.get(key)
+            if (
+                item is None
+                or item.get("mode") != "workbench"
+                or item.get("status") != "pending"
+                or item.get("session_id") != session_id
+                or int(item["expires_at"]) < int(self._now())
+                or card_id in item.get("cards", {})
+                or card.get("slot_id") not in item.get("catalog_slots", [])
+            ):
+                raise StoreConflict("session unavailable")
+            item.setdefault("cards", {})[card_id] = copy.deepcopy(dict(card))
+            item.setdefault("slots", []).append(card_id)
+            item["updated_at"] = int(self._now())
+
     def save_connection(
         self,
         *,

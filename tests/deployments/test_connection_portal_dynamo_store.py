@@ -35,11 +35,22 @@ class FakeTable:
         names = kwargs["ExpressionAttributeNames"]
         if item is None:
             raise ConditionalFailure()
-        if "#session_id" in names and "#slot" not in names:
+        if "#session_id" in names and "#slot" not in names and "#card" not in names:
             if item.get("status") != "pending" or item.get("session_id"):
                 raise ConditionalFailure()
             item["session_id"] = values[":session_id"]
             item["claimed_at"] = values[":now"]
+        elif "#card" in names:
+            if (
+                item.get("mode") != "workbench"
+                or item.get("session_id") != values[":session_id"]
+                or values[":connector_slot"] not in item.get("catalog_slots", [])
+                or values[":card_id"] in item.get("slots", [])
+            ):
+                raise ConditionalFailure()
+            item.setdefault("cards", {})[names["#card"]] = deepcopy(values[":card"])
+            item.setdefault("slots", []).extend(values[":card_ids"])
+            item["updated_at"] = values[":now"]
         elif "#slot" in names:
             if item.get("session_id") != values[":session_id"]:
                 raise ConditionalFailure()
@@ -141,3 +152,45 @@ def test_dynamo_store_maps_conditional_failures_to_store_conflict() -> None:
         store.claim_invitation(
             tenant_id="cjs-landscape", invitation_id="inv-1", session_id="session-2"
         )
+
+
+def test_dynamo_store_persists_allowlisted_workbench_cards() -> None:
+    table = FakeTable()
+    store = DynamoPortalStore(table=table, now=lambda: 1_700_000_010)
+    record = _record()
+    record.update(
+        {
+            "mode": "workbench",
+            "catalog_slots": ["google-drive", "microsoft-primary"],
+            "slots": ["card-1"],
+            "cards": {
+                "card-1": {"slot_id": "google-drive", "purpose": "CJS files"}
+            },
+        }
+    )
+    store.create_invitation(record)
+    store.claim_invitation(
+        tenant_id="cjs-landscape", invitation_id="inv-1", session_id="session-1"
+    )
+
+    store.add_card(
+        tenant_id="cjs-landscape",
+        invitation_id="inv-1",
+        session_id="session-1",
+        card_id="card-2",
+        card={"slot_id": "microsoft-primary", "purpose": "CJS office email"},
+    )
+    persisted = store.get_invitation(
+        tenant_id="cjs-landscape", invitation_id="inv-1"
+    )
+    add_call = [
+        payload
+        for name, payload in table.calls
+        if name == "update_item" and "#card" in payload.get("ExpressionAttributeNames", {})
+    ][0]
+
+    assert persisted is not None
+    assert persisted["slots"] == ["card-1", "card-2"]
+    assert persisted["cards"]["card-2"]["purpose"] == "CJS office email"
+    assert "list_append" in add_call["UpdateExpression"]
+    assert "contains(catalog_slots, :connector_slot)" in add_call["ConditionExpression"]

@@ -70,6 +70,48 @@ class DynamoPortalStore:
             self._raise_conflict_or_original(exc)
         return copy.deepcopy(response["Attributes"])
 
+    def add_card(
+        self,
+        *,
+        tenant_id: str,
+        invitation_id: str,
+        session_id: str,
+        card_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        now = int(self.now())
+        try:
+            self.table.update_item(
+                Key={"pk": self.invitation_key(tenant_id, invitation_id)},
+                UpdateExpression=(
+                    "SET cards.#card = :card, slots = list_append(slots, :card_ids), "
+                    "updated_at = :now"
+                ),
+                ConditionExpression=(
+                    "#mode = :workbench AND #status = :pending "
+                    "AND session_id = :session_id AND expires_at >= :now "
+                    "AND NOT contains(slots, :card_id) "
+                    "AND contains(catalog_slots, :connector_slot)"
+                ),
+                ExpressionAttributeNames={
+                    "#mode": "mode",
+                    "#status": "status",
+                    "#card": card_id,
+                },
+                ExpressionAttributeValues={
+                    ":workbench": "workbench",
+                    ":pending": "pending",
+                    ":session_id": session_id,
+                    ":now": now,
+                    ":card_id": card_id,
+                    ":card_ids": [card_id],
+                    ":connector_slot": str(card["slot_id"]),
+                    ":card": copy.deepcopy(dict(card)),
+                },
+            )
+        except Exception as exc:
+            self._raise_conflict_or_original(exc)
+
     def save_connection(
         self,
         *,
