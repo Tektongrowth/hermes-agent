@@ -135,6 +135,7 @@ systemctl daemon-reload
 systemctl enable --now cjs-synkedup-display.service
 systemctl enable --now cjs-synkedup-browser.service
 systemctl enable --now cjs-synkedup-mcp.service
+systemctl restart cjs-synkedup-mcp.service
 systemctl stop cjs-synkedup-vnc.service cjs-mason-gateway.service 2>/dev/null || true
 systemctl disable cjs-mason-gateway.service 2>/dev/null || true
 

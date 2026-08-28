@@ -18,7 +18,7 @@ Use this skill only inside the CJS Landscape and Whiteout Winter Services tenant
 3. Read matching rows by passing every completed SynkedUP job number to composio_read_drive_spreadsheet.
 4. Compare Estimated Hours, Actual Hours, Final Net Profit %, Final Net Profit $, and Final Total in that order.
 5. Normalize equivalent numeric formatting but report every real numeric mismatch, including zero and small decimal differences.
-6. Reconcile completed, matched, missing, and mismatched counts before answering.
+6. Build the complete normalized mismatch list first. Derive the mismatch count from that final list, then reconcile completed = matched + missing + mismatched before answering. Never state a count that differs from the number of jobs actually listed.
 7. Never perform the comparison from remembered or cached chat text.
 
 ## Failure rule

@@ -119,6 +119,7 @@ def test_installer_builds_from_a_commit_and_preserves_worktree_changes():
     assert "chgrp -R cjs-synkedup /opt/cjs-whiteout/venv" in installer
     assert "chmod -R g+rX /opt/cjs-whiteout/venv" in installer
     assert "commit the CJS SynkedUP release files before installing" in installer
+    assert "systemctl restart cjs-synkedup-mcp.service" in installer
 
 
 def test_runtime_secrets_are_fetched_without_secret_command_arguments():

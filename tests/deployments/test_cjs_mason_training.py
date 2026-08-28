@@ -37,6 +37,9 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         assert "A skill never grants access by itself" in text
         assert "Mason's training hook" in text
 
+    review = (skills_root / "job-cost-project-review" / "SKILL.md").read_text()
+    assert "Never state a count that differs from the number of jobs actually listed" in review
+
 
 def test_mason_config_enables_skills_for_alyssa_without_generic_toolsets() -> None:
     config = yaml.safe_load((ROOT / "config" / "mason-config.example.yaml").read_text())
