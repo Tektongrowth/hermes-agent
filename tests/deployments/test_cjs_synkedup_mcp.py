@@ -493,3 +493,43 @@ def test_financial_tools_never_appear_in_operations_toolset():
     assert operations.isdisjoint(financial)
     assert "synkedup_job_costing" in financial
     assert "synkedup_job_costing" not in operations
+
+
+def test_job_costing_status_query_filters_completed_rows(monkeypatch, tmp_path):
+    raw = {
+        "url": "https://cjs-landscape.synkedup.com/dashboard#!/",
+        "title": "Dashboard",
+        "headings": [],
+        "alerts": [],
+        "fields": [],
+        "tables": [
+            {
+                "headers": ["Job Number", "Name", "Status", "Final Total"],
+                "rows": [
+                    ["AY-659", "Landscape Renovation", "Completed", "$105,000"],
+                    ["AY-425", "Lawn Restoration", "Waiting on parts", "$7,500"],
+                ],
+            }
+        ],
+        "cards": [],
+        "links": [],
+    }
+
+    class FakeBrowser:
+        def labor_variance(self, *, include_financial=False):
+            assert include_financial is True
+            return json.loads(json.dumps(raw))
+
+    monkeypatch.setattr(synkedup, "SynkedUPBrowser", FakeBrowser)
+    monkeypatch.setattr(synkedup, "_AUDIT", synkedup.AuditLogger(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(synkedup._RATE_LIMITER, "acquire", lambda: None)
+
+    result = synkedup._execute_read(
+        synkedup.TOOL_SPEC_BY_NAME["synkedup_job_costing"],
+        query="status:completed",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["tables"][0]["rows"] == [
+        ["AY-659", "Landscape Renovation", "Completed", "$105,000"]
+    ]

@@ -142,7 +142,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_job_documents", "operations", "/jobs", "List read-only job PDFs and downloadable documents.", "operations", "/jobs/{record_id}/documents"),
     ToolSpec("synkedup_time_entries", "operations", "/time", "Read timesheets and time entries.", "operations", "/time/{record_id}"),
     ToolSpec("synkedup_clock_status", "operations", "/time/clock-status", "Read current clock status without clocking anyone in or out.", "operations"),
-    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Scan the jobs included in the current SynkedUP dashboard date range and compare estimated versus actual labor hours without payroll or labor cost fields.", "operations", "/reports/labor-hours/{record_id}"),
+    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Scan the jobs included in the current SynkedUP dashboard date range and compare estimated versus actual labor hours without payroll or labor cost fields. Leave query empty for all included jobs, or use query='status:completed' for completed jobs only.", "operations", "/reports/labor-hours/{record_id}"),
     ToolSpec("synkedup_materials", "operations", "/materials", "Read material quantities and fulfillment state without costs.", "operations", "/materials/{record_id}"),
     ToolSpec("synkedup_equipment", "operations", "/equipment", "Read equipment assigned to work.", "operations", "/equipment/{record_id}"),
     ToolSpec("synkedup_subcontractors", "operations", "/subcontractors", "Read subcontractor assignments without payment fields.", "operations", "/subcontractors/{record_id}"),
@@ -150,7 +150,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_operations_dashboard", "operations", "/dashboard", "Read the operations dashboard.", "operations"),
     ToolSpec("synkedup_operations_reports", "operations", "/reports", "List and read non-financial operations reports.", "operations", "/reports/{record_id}"),
     ToolSpec("synkedup_exports", "operations", "/exports", "List documented read-only exports and same-host download links.", "operations"),
-    ToolSpec("synkedup_job_costing", "financial", "/job-costing", "Scan the jobs included in the current SynkedUP dashboard date range and return estimated versus actual labor, job totals, and estimated/final net profit.", "financial", "/job-costing/{record_id}"),
+    ToolSpec("synkedup_job_costing", "financial", "/job-costing", "Scan the jobs included in the current SynkedUP dashboard date range and return estimated versus actual labor, job totals, and estimated/final net profit. Leave query empty for all included jobs, or use query='status:completed' for completed jobs only.", "financial", "/job-costing/{record_id}"),
     ToolSpec("synkedup_margins", "financial", "/reports/margins", "Read job and company margin reports.", "financial", "/reports/margins/{record_id}"),
     ToolSpec("synkedup_invoices", "financial", "/invoices", "Read invoices without creating, editing, sending, or collecting payment.", "financial", "/invoices/{record_id}"),
     ToolSpec("synkedup_balances", "financial", "/reports/balances", "Read customer and job balances.", "financial", "/reports/balances/{record_id}"),
@@ -913,6 +913,32 @@ def _filter_page(page: dict[str, Any], access_class: str) -> dict[str, Any]:
     return result
 
 
+def _apply_dashboard_status_filter(payload: dict[str, Any], query: str) -> bool:
+    """Apply an exact Status-column filter for dashboard labor/costing tools."""
+    normalized = query.strip().casefold()
+    if normalized.startswith("status:"):
+        expected = normalized.split(":", 1)[1].strip()
+    elif normalized.startswith("status="):
+        expected = normalized.split("=", 1)[1].strip()
+    else:
+        return False
+    if not expected:
+        return False
+    for table in payload.get("tables", []):
+        headers = [str(value).strip().casefold() for value in table.get("headers", [])]
+        if "status" not in headers:
+            table["rows"] = []
+            continue
+        status_index = headers.index("status")
+        table["rows"] = [
+            row
+            for row in table.get("rows", [])
+            if len(row) > status_index
+            and str(row[status_index]).strip().casefold() == expected
+        ]
+    return True
+
+
 def _local_filter(
     payload: dict[str, Any],
     *,
@@ -1005,9 +1031,13 @@ def _execute_read(
             else:
                 raw = browser.read(spec, record_id=record_id)
         filtered = _filter_page(raw, spec.access_class)
+        local_query = query
+        if spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
+            if _apply_dashboard_status_filter(filtered, query):
+                local_query = ""
         filtered = _local_filter(
             filtered,
-            query=query,
+            query=local_query,
             start_date=start_date,
             end_date=end_date,
             page_size=page_size,
