@@ -92,10 +92,16 @@ def _approved_prefixes() -> tuple[str, ...]:
     return prefixes
 
 
-def _account_selector() -> str:
-    selector = os.getenv("CJS_COMPOSIO_ACCOUNT", "").strip()
+def _account_selector(tool_slug: str = "") -> str:
+    prefix = str(tool_slug or "").strip().upper().split("_", 1)[0]
+    env_name = f"CJS_COMPOSIO_ACCOUNT_{prefix}" if prefix else "CJS_COMPOSIO_ACCOUNT"
+    selector = os.getenv(env_name, "").strip()
+    if not selector and prefix == "GOOGLEDRIVE":
+        selector = os.getenv("CJS_COMPOSIO_ACCOUNT", "").strip()
     if not selector or len(selector) > 200 or any(ch.isspace() for ch in selector):
-        raise BridgeConfigurationError("the pinned CJS Composio account is missing or invalid")
+        raise BridgeConfigurationError(
+            f"the pinned CJS Composio account for {prefix or 'the approved toolkit'} is missing or invalid"
+        )
     return selector
 
 
@@ -588,7 +594,7 @@ def _audit(tool: str, status: str, started: float, *, remote_tool: str = "") -> 
         "remote_tool": remote_tool,
         "status": status,
         "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
-        "account_hash": hashlib.sha256(_account_selector().encode()).hexdigest()[:12],
+        "account_hash": hashlib.sha256(_account_selector(remote_tool).encode()).hexdigest()[:12],
     }
     path = Path(os.getenv("CJS_COMPOSIO_AUDIT_PATH", DEFAULT_AUDIT_PATH))
     with _AUDIT_LOCK:
@@ -672,7 +678,7 @@ def composio_tool_schema(tool_slug: str) -> Any:
     started = time.monotonic()
     slug = _validate_tool_slug(tool_slug)
     try:
-        result = _run(["execute", slug, "--account", _account_selector(), "--get-schema"])
+        result = _run(["execute", slug, "--account", _account_selector(slug), "--get-schema"])
         _audit("composio_tool_schema", "ok", started, remote_tool=slug)
         return result
     except Exception:
@@ -844,7 +850,7 @@ def composio_execute(
         "execute",
         slug,
         "--account",
-        _account_selector(),
+        _account_selector(slug),
         "--data",
         _bounded_arguments(arguments),
     ]

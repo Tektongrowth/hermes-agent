@@ -83,9 +83,10 @@ mcp_servers:
     supports_parallel_tool_calls: false
     env:
       CJS_COMPOSIO_BIN: /home/nick/.local/bin/composio
-      CJS_COMPOSIO_TOOLKITS: googledrive
-      CJS_COMPOSIO_TOOL_PREFIXES: GOOGLEDRIVE
+      CJS_COMPOSIO_TOOLKITS: googledrive,outlook
+      CJS_COMPOSIO_TOOL_PREFIXES: GOOGLEDRIVE,OUTLOOK
       CJS_COMPOSIO_ACCOUNT: REPLACE_WITH_ACTIVE_CJS_GOOGLEDRIVE_ACCOUNT
+      CJS_COMPOSIO_ACCOUNT_OUTLOOK: REPLACE_WITH_ACTIVE_CJS_OUTLOOK_ACCOUNT
       CJS_COMPOSIO_AUDIT_PATH: /var/lib/cjs-whiteout/hermes/logs/composio-audit.jsonl
     tools:
       resources: false

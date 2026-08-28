@@ -13,9 +13,10 @@ DEPLOYMENT_ROOT = Path(__file__).parents[2] / "deployments" / "cjs_whiteout"
 
 @pytest.fixture(autouse=True)
 def configured(monkeypatch, tmp_path):
-    monkeypatch.setenv("CJS_COMPOSIO_TOOLKITS", "googledrive")
-    monkeypatch.setenv("CJS_COMPOSIO_TOOL_PREFIXES", "GOOGLEDRIVE")
+    monkeypatch.setenv("CJS_COMPOSIO_TOOLKITS", "googledrive,outlook")
+    monkeypatch.setenv("CJS_COMPOSIO_TOOL_PREFIXES", "GOOGLEDRIVE,OUTLOOK")
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT", "googledrive_test-account")
+    monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK", "outlook_test-account")
     monkeypatch.setenv("CJS_COMPOSIO_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setattr(bridge, "_composio_binary", lambda: "/safe/composio")
 
@@ -49,6 +50,18 @@ def test_execute_rejects_unapproved_toolkit():
         bridge.composio_execute("GMAIL_SEND_EMAIL", {"recipient": "x@example.com"})
 
 
+def test_execute_pins_outlook_to_the_cjs_mailbox(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout='{"successful":true}', stderr="")
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    bridge.composio_execute("OUTLOOK_QUERY_EMAILS", {"folder": "inbox", "top": 1})
+    assert seen["argv"][3:5] == ["--account", "outlook_test-account"]
+
+
 def test_tool_slug_rejects_shell_metacharacters():
     with pytest.raises(bridge.BridgeRequestError, match="uppercase Composio tool slug"):
         bridge.composio_execute("GOOGLEDRIVE_FIND_FILE;rm", {})
@@ -68,7 +81,7 @@ def test_search_is_forced_to_approved_toolkits(monkeypatch):
         "search",
         "find the top down plan",
         "--toolkits",
-        "googledrive",
+        "googledrive,outlook",
         "--limit",
         "5",
     ]
@@ -94,6 +107,12 @@ def test_missing_account_fails_closed(monkeypatch):
     monkeypatch.delenv("CJS_COMPOSIO_ACCOUNT")
     with pytest.raises(bridge.BridgeConfigurationError, match="pinned CJS"):
         bridge._account_selector()
+
+
+def test_missing_outlook_account_fails_closed(monkeypatch):
+    monkeypatch.delenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK")
+    with pytest.raises(bridge.BridgeConfigurationError, match="OUTLOOK"):
+        bridge._account_selector("OUTLOOK_QUERY_EMAILS")
 
 
 def test_cli_parser_accepts_json_with_trailing_download_status():
