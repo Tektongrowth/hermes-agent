@@ -68,6 +68,14 @@ def test_browser_and_mcp_ports_are_bound_to_loopback():
     assert "IPAddressAllow=localhost" in mcp
 
 
+def test_mason_gateway_can_refresh_aws_cache_and_drain_cleanly():
+    gateway = _read(SYSTEMD / "cjs-mason-gateway.service")
+    assert "TimeoutStopSec=210" in gateway
+    assert "/home/nick/.aws/sso/cache" in gateway
+    assert "/home/nick/.aws/cli/cache" in gateway
+    assert "ProtectHome=read-only" in gateway
+
+
 def test_login_vnc_is_loopback_only_and_never_auto_enabled():
     vnc = _read(SYSTEMD / "cjs-synkedup-vnc.service")
     assert "-localhost" in vnc

@@ -18,7 +18,7 @@ Environment=PATH=/home/nick/.hermes/hermes-agent/venv/bin:/home/linuxbrew/.linux
 ExecStart=/opt/cjs-whiteout/bin/run-mason-gateway
 Restart=always
 RestartSec=5
-TimeoutStopSec=90
+TimeoutStopSec=210
 KillMode=mixed
 KillSignal=SIGTERM
 NoNewPrivileges=true
@@ -26,7 +26,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/cjs-whiteout/hermes /var/log/cjs-synkedup
+ReadWritePaths=/var/lib/cjs-whiteout/hermes /var/log/cjs-synkedup /home/nick/.aws/sso/cache /home/nick/.aws/cli/cache
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
