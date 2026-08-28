@@ -6,7 +6,7 @@ from pathlib import Path
 SOUL_PATH = Path(__file__).parents[2] / "deployments" / "cjs_whiteout" / "SOUL.md"
 
 
-def test_mason_soul_defines_contractor_voice_and_current_employee_tools() -> None:
+def test_mason_soul_defines_contractor_voice_and_current_tools() -> None:
     soul = SOUL_PATH.read_text(encoding="utf-8")
     lowered = soul.casefold()
 
@@ -14,23 +14,31 @@ def test_mason_soul_defines_contractor_voice_and_current_employee_tools() -> Non
     assert "contractor-to-contractor" in lowered
     assert "plain words" in lowered
     assert "light humor" in lowered
-    assert "synkedup_active_jobs" in soul
-    assert "synkedup_job_brief" in soul
-    assert "synkedup_schedule" in soul
-    assert "synkedup_labor_hours_variance" in soul
-    assert "synkedup_item_quantity_variance" in soul
+    for tool in (
+        "synkedup_labor_variance",
+        "synkedup_job_costing",
+        "composio_read_drive_spreadsheet",
+        "cronjob",
+        "todo",
+    ):
+        assert tool in soul
 
 
-def test_mason_soul_keeps_employee_safety_rules_without_stale_tool_guidance() -> None:
+def test_mason_soul_keeps_current_safety_rules_without_stale_tool_guidance() -> None:
     soul = SOUL_PATH.read_text(encoding="utf-8")
     lowered = soul.casefold()
 
-    for protected_term in ("pricing", "margins", "payroll", "quickbooks", "credentials"):
+    for protected_term in (
+        "billing",
+        "payroll",
+        "credentials",
+        "irreversible",
+        "unknown users",
+    ):
         assert protected_term in lowered
     assert "discord direct messages fail closed" in lowered
-    assert "never create, edit, delete, send, approve, pay, invoice, schedule" in lowered
-    assert "crew can never perform writes, financial actions, or mason administration" in lowered
-    assert "regardless of approval or which tools exist" in lowered
+    assert "requires confirmation for ordinary users" in lowered
+    assert "keep cjs landscape and whiteout winter services data inside this client account" in lowered
 
     for stale_tool in (
         "connector_status",

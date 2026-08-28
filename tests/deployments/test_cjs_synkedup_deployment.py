@@ -43,6 +43,7 @@ def test_alyssa_has_complete_admin_read_profile_and_defaults_deny():
         "composio-approved",
         "vision",
         "cronjob",
+        "todo",
     }
 
 
@@ -53,6 +54,7 @@ def test_mason_executes_drive_comparisons_and_supports_reminders():
     assert "search for the exact project and destination first" in soul
     assert "call `cronjob`" in soul
     assert "A checklist can stay in the requester's Discord conversation" in soul
+    assert "call `todo` with the complete list" in soul
 
 
 def test_browser_and_mcp_ports_are_bound_to_loopback():

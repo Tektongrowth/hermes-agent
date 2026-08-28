@@ -21,7 +21,7 @@ agent:
   - web
   - memory
   - skills
-  - todo
+
 discord:
   require_mention: true
   allowed_channels: 1539070492424675421,1539071026665885736,1542715089638002789
@@ -64,6 +64,7 @@ platform_principal_toolsets:
       - composio-approved
       - vision
       - cronjob
+      - todo
       '1541580058152665199': *approved-toolsets
     roles: {}
     user_action_policy:
