@@ -195,6 +195,59 @@ def test_pdf_page_count_has_a_hard_limit(monkeypatch, tmp_path):
         bridge._pdf_page_count(tmp_path / "document.pdf")
 
 
+def test_pdf_renderer_preserves_native_full_page_jpeg(monkeypatch, tmp_path):
+    native_jpeg = b"\xff\xd8\xffnative-image-bytes\xff\xd9"
+    calls = []
+
+    def fake_helper(args, timeout):
+        calls.append(args)
+        command = Path(args[0]).name
+        if command == "pdfinfo":
+            return SimpleNamespace(stdout="Page size:       960 x 540 pts\n")
+        if command == "pdfimages" and "-list" in args:
+            return SimpleNamespace(
+                stdout=(
+                    "page num type width height color comp bpc enc interp object ID "
+                    "x-ppi y-ppi size ratio\n"
+                    "1 0 image 1280 720 rgb 3 8 jpeg no 5 0 96 96 84.5K 3.1%\n"
+                )
+            )
+        if command == "pdfimages" and "-j" in args:
+            Path(f"{args[-1]}-000.jpg").write_bytes(native_jpeg)
+            return SimpleNamespace(stdout="")
+        pytest.fail(f"unexpected PDF helper call: {args}")
+
+    monkeypatch.setattr(bridge, "_run_pdf_helper", fake_helper)
+
+    rendered = bridge._render_pdf_pages(tmp_path / "document.pdf", tmp_path, 1)
+
+    assert rendered == [native_jpeg]
+    assert all(Path(args[0]).name != "pdftoppm" for args in calls)
+
+
+def test_pdf_renderer_fallback_does_not_force_scale(monkeypatch, tmp_path):
+    fallback_jpeg = b"\xff\xd8\xfffallback-image-bytes\xff\xd9"
+    raster_args = []
+
+    def fake_helper(args, timeout):
+        command = Path(args[0]).name
+        if command == "pdfimages" and "-list" in args:
+            return SimpleNamespace(stdout="no embedded full-page JPEGs\n")
+        if command == "pdftoppm":
+            raster_args.extend(args)
+            Path(f"{args[-1]}-1.jpg").write_bytes(fallback_jpeg)
+            return SimpleNamespace(stdout="")
+        pytest.fail(f"unexpected PDF helper call: {args}")
+
+    monkeypatch.setattr(bridge, "_run_pdf_helper", fake_helper)
+
+    rendered = bridge._render_pdf_pages(tmp_path / "document.pdf", tmp_path, 1)
+
+    assert rendered == [fallback_jpeg]
+    assert "-scale-to" not in raster_args
+    assert raster_args[raster_args.index("-r") + 1] == "150"
+
+
 def test_read_drive_pdf_returns_text_and_image_blocks(monkeypatch):
     seen = {}
     download_url = (

@@ -310,26 +310,101 @@ def _extract_pdf_text(pdf_path: Path, workdir: Path) -> str:
     return text[:MAX_PDF_TEXT_CHARS]
 
 
-def _render_pdf_pages(pdf_path: Path, workdir: Path, pages: int) -> list[bytes]:
-    output_prefix = workdir / "page"
+def _pdf_page_sizes(pdf_path: Path, pages: int) -> dict[int, tuple[float, float]]:
+    completed = _run_pdf_helper(
+        [_pdf_binary("pdfinfo"), "-f", "1", "-l", str(pages), str(pdf_path)],
+        timeout=30,
+    )
+    matches = re.findall(
+        r"(?m)^Page(?:\s+([0-9]+))?\s+size:\s*"
+        r"([0-9]+(?:\.[0-9]+)?)\s+x\s+([0-9]+(?:\.[0-9]+)?)\s+pts\s*$",
+        completed.stdout,
+    )
+    if pages == 1 and len(matches) == 1 and not matches[0][0]:
+        return {1: (float(matches[0][1]), float(matches[0][2]))}
+    sizes = {
+        int(page): (float(width), float(height))
+        for page, width, height in matches
+        if page
+    }
+    return sizes if set(sizes) == set(range(1, pages + 1)) else {}
+
+
+def _native_full_page_jpegs(
+    pdf_path: Path,
+    workdir: Path,
+    pages: int,
+) -> list[Path] | None:
+    completed = _run_pdf_helper(
+        [_pdf_binary("pdfimages"), "-list", str(pdf_path)],
+        timeout=30,
+    )
+    rows: list[tuple[int, int, int, int, int]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 16 or not parts[0].isdigit():
+            continue
+        page, image_type, encoding = int(parts[0]), parts[2], parts[8]
+        if image_type != "image" or encoding.lower() != "jpeg":
+            return None
+        try:
+            width, height = int(parts[3]), int(parts[4])
+            x_ppi, y_ppi = int(parts[12]), int(parts[13])
+        except ValueError:
+            return None
+        if min(width, height, x_ppi, y_ppi) < 1:
+            return None
+        rows.append((page, width, height, x_ppi, y_ppi))
+    if len(rows) != pages or [row[0] for row in rows] != list(range(1, pages + 1)):
+        return None
+
+    page_sizes = _pdf_page_sizes(pdf_path, pages)
+    if not page_sizes:
+        return None
+    for page, width, height, x_ppi, y_ppi in rows:
+        page_width, page_height = page_sizes[page]
+        image_width = width * 72 / x_ppi
+        image_height = height * 72 / y_ppi
+        tolerance = max(2.0, page_width * 0.01, page_height * 0.01)
+        if abs(image_width - page_width) > tolerance or abs(image_height - page_height) > tolerance:
+            return None
+
+    output_prefix = workdir / "native-page"
     _run_pdf_helper(
-        [
-            _pdf_binary("pdftoppm"),
-            "-jpeg",
-            "-jpegopt",
-            "quality=88",
-            "-scale-to",
-            "3500",
-            "-f",
-            "1",
-            "-l",
-            str(pages),
-            str(pdf_path),
-            str(output_prefix),
-        ],
+        [_pdf_binary("pdfimages"), "-j", str(pdf_path), str(output_prefix)],
         timeout=120,
     )
-    rendered_paths = sorted(workdir.glob("page-*.jpg"))
+    extracted_paths = sorted(workdir.glob("native-page-*"))
+    if (
+        len(extracted_paths) != pages
+        or any(path.suffix.lower() not in {".jpg", ".jpeg"} for path in extracted_paths)
+    ):
+        return None
+    return extracted_paths
+
+
+def _render_pdf_pages(pdf_path: Path, workdir: Path, pages: int) -> list[bytes]:
+    rendered_paths = _native_full_page_jpegs(pdf_path, workdir, pages)
+    if rendered_paths is None:
+        output_prefix = workdir / "page"
+        _run_pdf_helper(
+            [
+                _pdf_binary("pdftoppm"),
+                "-jpeg",
+                "-jpegopt",
+                "quality=88",
+                "-r",
+                "150",
+                "-f",
+                "1",
+                "-l",
+                str(pages),
+                str(pdf_path),
+                str(output_prefix),
+            ],
+            timeout=120,
+        )
+        rendered_paths = sorted(workdir.glob("page-*.jpg"))
     if len(rendered_paths) != pages:
         raise BridgeRequestError("the PDF renderer returned an incomplete page set")
     rendered: list[bytes] = []
