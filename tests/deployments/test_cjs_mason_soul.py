@@ -48,3 +48,16 @@ def test_mason_soul_keeps_current_safety_rules_without_stale_tool_guidance() -> 
     ):
         assert stale_tool not in soul
     assert "Scope: SynkedUP Items is not a physical-material-only report" not in soul
+
+
+def test_mason_soul_requires_complete_job_number_comparison() -> None:
+    soul = SOUL_PATH.read_text(encoding="utf-8").casefold()
+
+    assert "match jobs by exact job number" in soul
+    assert "estimated hours" in soul
+    assert "actual hours" in soul
+    assert "final net profit %" in soul
+    assert "final net profit $" in soul
+    assert "final total" in soul
+    assert "including zero values and small decimal differences" in soul
+    assert "do not count the project-name column as a mismatch" in soul
