@@ -35,6 +35,7 @@ DEFAULT_CDP_URL = "http://127.0.0.1:9341"
 DEFAULT_AUDIT_PATH = "/var/log/cjs-synkedup/audit.jsonl"
 DEFAULT_DASHBOARD_CACHE_PATH = "/var/lib/cjs-synkedup/cache/dashboard-jobs.json"
 DASHBOARD_CACHE_MAX_AGE_SECONDS = 86_400
+FULL_SCAN_CACHE_MAX_AGE_SECONDS = 900
 MAX_QUERY_LENGTH = 100
 MAX_RECORD_ID_LENGTH = 80
 MAX_RESULT_ROWS = 100
@@ -647,6 +648,85 @@ def _load_dashboard_job_cache(
     }
 
 
+def _full_scan_cache_path(include_financial: bool) -> Path:
+    name = "job-costing.json" if include_financial else "labor-variance.json"
+    return _dashboard_cache_path().parent / name
+
+
+def _write_full_scan_cache(result: dict[str, Any], *, include_financial: bool) -> None:
+    payload = {
+        "tenant": TENANT,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "include_financial": include_financial,
+        "result": result,
+    }
+    path = _full_scan_cache_path(include_financial)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def _load_full_scan_cache(
+    *,
+    origin: str,
+    include_financial: bool,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(
+            _full_scan_cache_path(include_financial).read_text(encoding="utf-8")
+        )
+        captured_at = datetime.fromisoformat(str(payload.get("captured_at", "")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - captured_at).total_seconds()
+    if age < -300 or age > FULL_SCAN_CACHE_MAX_AGE_SECONDS:
+        return None
+    if payload.get("tenant") != TENANT:
+        return None
+    if payload.get("include_financial") is not include_financial:
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    try:
+        _validate_result_origin(str(result.get("url", "")), origin)
+    except SecurityViolation:
+        return None
+    tables = result.get("tables") or []
+    if not isinstance(tables, list) or len(tables) != 1:
+        return None
+    rows = tables[0].get("rows") if isinstance(tables[0], dict) else None
+    minimum_columns = 13 if include_financial else 6
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or len(rows) > MAX_RESULT_ROWS
+        or any(not isinstance(row, list) or len(row) < minimum_columns for row in rows)
+    ):
+        return None
+    cached = json.loads(json.dumps(result))
+    cached.setdefault("alerts", []).insert(
+        0,
+        "Project details were read live recently and reused to avoid repeating the same "
+        "long dashboard scan.",
+    )
+    cached.setdefault("fields", []).extend(
+        [
+            {"label": "Project detail scan source", "value": "recent live scan cache"},
+            {
+                "label": "Project detail scan captured at",
+                "value": captured_at.astimezone(timezone.utc).isoformat(),
+            },
+        ]
+    )
+    return cached
+
+
 class SynkedUPBrowser:
     def __init__(self):
         self.base_url = os.getenv("CJS_SYNKEDUP_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -685,6 +765,12 @@ class SynkedUPBrowser:
         return page
 
     def labor_variance(self, *, include_financial: bool = False) -> dict[str, Any]:
+        cached = _load_full_scan_cache(
+            origin=self.origin,
+            include_financial=include_financial,
+        )
+        if cached is not None:
+            return cached
         dashboard_url = f"{self.base_url}/dashboard"
         controller = CDPClient()
         worker = CDPClient()
@@ -852,7 +938,7 @@ class SynkedUPBrowser:
                     "Final Net Profit $",
                 ]
             )
-        return {
+        result = {
             "url": dashboard_url,
             "title": (
                 "SynkedUP Dashboard Job Costing"
@@ -883,6 +969,22 @@ class SynkedUPBrowser:
             "cards": [],
             "links": [],
         }
+        expected_rows = sum(isinstance(job, dict) for job in jobs[:MAX_RESULT_ROWS])
+        complete = expected_rows > 0 and len(rows) == expected_rows
+        if include_financial:
+            complete = complete and all(
+                len(row) >= 13
+                and bool(str(row[8]).strip())
+                and bool(str(row[11]).strip())
+                and bool(str(row[12]).strip())
+                for row in rows
+            )
+        if complete:
+            try:
+                _write_full_scan_cache(result, include_financial=include_financial)
+            except OSError:
+                pass
+        return result
 
     def status(self) -> dict[str, Any]:
         client = CDPClient()

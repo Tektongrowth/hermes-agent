@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -712,3 +712,110 @@ def test_dashboard_scan_uses_same_range_cache_when_widget_errors(monkeypatch, tm
     fields = {field["label"]: field["value"] for field in result["fields"]}
     assert fields["Dashboard job list source"] == "same-range cache"
     assert result["alerts"]
+
+
+def test_full_scan_cache_round_trip_is_short_lived_and_origin_bound(monkeypatch, tmp_path):
+    cache_path = tmp_path / "dashboard-jobs.json"
+    monkeypatch.setenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", str(cache_path))
+    captured = datetime.now(timezone.utc)
+    result = {
+        "url": "https://app.synkedup.test/dashboard",
+        "title": "SynkedUP Dashboard Job Costing",
+        "headings": ["Jobs included in this data"],
+        "alerts": [],
+        "fields": [],
+        "tables": [
+            {
+                "headers": ["Job Number"],
+                "rows": [
+                    [
+                        "AY-659",
+                        "Landscape Renovation",
+                        "Completed",
+                        10.0,
+                        12.0,
+                        2.0,
+                        "$10,000.00",
+                        "$9,000.00",
+                        "$9,500.00",
+                        "30.00%",
+                        "$3,000.00",
+                        "25.00%",
+                        "$2,375.00",
+                    ]
+                ],
+            }
+        ],
+        "cards": [],
+        "links": [],
+    }
+
+    synkedup._write_full_scan_cache(result, include_financial=True)
+    loaded = synkedup._load_full_scan_cache(
+        origin="https://app.synkedup.test",
+        include_financial=True,
+        now=captured,
+    )
+
+    assert loaded is not None
+    assert loaded["tables"] == result["tables"]
+    assert loaded["alerts"][0].startswith("Project details were read live recently")
+    fields = {field["label"]: field["value"] for field in loaded["fields"]}
+    assert fields["Project detail scan source"] == "recent live scan cache"
+    assert synkedup._load_full_scan_cache(
+        origin="https://evil.test",
+        include_financial=True,
+        now=captured,
+    ) is None
+    assert synkedup._load_full_scan_cache(
+        origin="https://app.synkedup.test",
+        include_financial=False,
+        now=captured,
+    ) is None
+    assert synkedup._load_full_scan_cache(
+        origin="https://app.synkedup.test",
+        include_financial=True,
+        now=captured + timedelta(seconds=synkedup.FULL_SCAN_CACHE_MAX_AGE_SECONDS + 1),
+    ) is None
+
+
+def test_full_scan_cache_rejects_empty_rows(monkeypatch, tmp_path):
+    cache_path = tmp_path / "dashboard-jobs.json"
+    monkeypatch.setenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", str(cache_path))
+    result = {
+        "url": "https://app.synkedup.test/dashboard",
+        "alerts": [],
+        "fields": [],
+        "tables": [{"headers": [], "rows": []}],
+    }
+    synkedup._write_full_scan_cache(result, include_financial=True)
+    assert synkedup._load_full_scan_cache(
+        origin="https://app.synkedup.test",
+        include_financial=True,
+    ) is None
+
+
+def test_browser_returns_full_scan_cache_without_connecting_to_cdp(monkeypatch, tmp_path):
+    cache_path = tmp_path / "dashboard-jobs.json"
+    monkeypatch.setenv("CJS_SYNKEDUP_DASHBOARD_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("CJS_SYNKEDUP_BASE_URL", "https://app.synkedup.test")
+    result = {
+        "url": "https://app.synkedup.test/dashboard",
+        "alerts": [],
+        "fields": [],
+        "tables": [
+            {
+                "headers": [],
+                "rows": [["AY-659", "Job", "Completed", 10.0, 12.0, 2.0]],
+            }
+        ],
+    }
+    synkedup._write_full_scan_cache(result, include_financial=False)
+
+    class FailIfConstructed:
+        def __init__(self):
+            raise AssertionError("CDP should not be opened for a valid recent full-scan cache")
+
+    monkeypatch.setattr(synkedup, "CDPClient", FailIfConstructed)
+    loaded = synkedup.SynkedUPBrowser().labor_variance()
+    assert loaded["tables"] == result["tables"]
