@@ -617,6 +617,15 @@ def test_dashboard_job_cache_requires_matching_range_and_safe_routes(monkeypatch
         date_start="2026-07-28",
         date_end="2026-08-28",
     ) is None
+    latest = synkedup._load_dashboard_job_cache(
+        origin="https://app.synkedup.test",
+        date_start="2026-07-28",
+        date_end="2026-08-28",
+        allow_range_mismatch=True,
+    )
+    assert latest is not None
+    assert latest["cache_range_match"] is False
+    assert latest["date_start"] == "2026-07-27"
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     payload["jobs"][0]["href"] = "https://evil.test/#!/projects/466093"

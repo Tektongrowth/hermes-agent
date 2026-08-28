@@ -18,7 +18,8 @@ def _read(path: Path) -> str:
 
 def test_catalog_config_covers_every_connector_tool_once():
     config = yaml.safe_load(_read(ROOT / "config" / "mason-config.example.yaml"))
-    toolsets = config["mcp_servers"]["cjs-synkedup"]["tools"]["toolsets"]
+    server = config["mcp_servers"]["cjs-synkedup"]
+    toolsets = server["tools"]["toolsets"]
     configured = [name for names in toolsets.values() for name in names]
     assert set(configured) == set(connector.ALL_TOOL_NAMES)
     assert len(configured) == len(set(configured))
@@ -28,6 +29,7 @@ def test_catalog_config_covers_every_connector_tool_once():
         "synkedup-sales-read",
         "synkedup-financial-read",
     }
+    assert server["timeout"] >= 300
 
 
 def test_alyssa_has_complete_admin_read_profile_and_defaults_deny():
@@ -51,6 +53,7 @@ def test_mason_executes_drive_comparisons_and_supports_reminders():
     soul = _read(ROOT / "SOUL.md")
     assert "Never reply with a plan" in soul
     assert "Do not stop after saying what you will compare" in soul
+    assert "Do not also call `synkedup_labor_variance`" in soul
     assert "search for the exact project and destination first" in soul
     assert "call `cronjob`" in soul
     assert "A checklist can stay in the requester's Discord conversation" in soul

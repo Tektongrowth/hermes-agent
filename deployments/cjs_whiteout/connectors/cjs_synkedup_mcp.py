@@ -144,7 +144,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_job_documents", "operations", "/jobs", "List read-only job PDFs and downloadable documents.", "operations", "/jobs/{record_id}/documents"),
     ToolSpec("synkedup_time_entries", "operations", "/time", "Read timesheets and time entries.", "operations", "/time/{record_id}"),
     ToolSpec("synkedup_clock_status", "operations", "/time/clock-status", "Read current clock status without clocking anyone in or out.", "operations"),
-    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Scan the jobs included in the current SynkedUP dashboard date range and compare estimated versus actual labor hours without payroll or labor cost fields. Leave query empty for all included jobs, or use query='status:completed' for completed jobs only.", "operations", "/reports/labor-hours/{record_id}"),
+    ToolSpec("synkedup_labor_variance", "operations", "/reports/labor-hours", "Scan the jobs included in the current SynkedUP dashboard date range and compare estimated versus actual labor hours without payroll or labor cost fields. Leave query empty for all included jobs, or use query='status:completed' for completed jobs only. If the request also asks for job totals or profit, do not call this tool; call synkedup_job_costing instead because it already includes labor hours.", "operations", "/reports/labor-hours/{record_id}"),
     ToolSpec("synkedup_materials", "operations", "/materials", "Read material quantities and fulfillment state without costs.", "operations", "/materials/{record_id}"),
     ToolSpec("synkedup_equipment", "operations", "/equipment", "Read equipment assigned to work.", "operations", "/equipment/{record_id}"),
     ToolSpec("synkedup_subcontractors", "operations", "/subcontractors", "Read subcontractor assignments without payment fields.", "operations", "/subcontractors/{record_id}"),
@@ -604,8 +604,9 @@ def _load_dashboard_job_cache(
     date_start: str,
     date_end: str,
     now: datetime | None = None,
+    allow_range_mismatch: bool = False,
 ) -> dict[str, Any] | None:
-    if not date_start or not date_end:
+    if (not date_start or not date_end) and not allow_range_mismatch:
         return None
     try:
         payload = json.loads(_dashboard_cache_path().read_text(encoding="utf-8"))
@@ -619,7 +620,10 @@ def _load_dashboard_job_cache(
         return None
     if payload.get("tenant") != TENANT:
         return None
-    if payload.get("date_start") != date_start or payload.get("date_end") != date_end:
+    cache_range_match = (
+        payload.get("date_start") == date_start and payload.get("date_end") == date_end
+    )
+    if not cache_range_match and not allow_range_mismatch:
         return None
     jobs: list[dict[str, str]] = []
     for job in payload.get("jobs") or []:
@@ -635,10 +639,11 @@ def _load_dashboard_job_cache(
         return None
     return {
         "ready": True,
-        "date_start": date_start,
-        "date_end": date_end,
+        "date_start": str(payload.get("date_start", "")),
+        "date_end": str(payload.get("date_end", "")),
         "jobs": jobs[:MAX_RESULT_ROWS],
         "cache_captured_at": captured_at.astimezone(timezone.utc).isoformat(),
+        "cache_range_match": cache_range_match,
     }
 
 
@@ -705,19 +710,36 @@ class SynkedUPBrowser:
                 page = controller.evaluate_constant(EXTRACT_PAGE_SCRIPT)
                 if isinstance(page, dict) and _looks_logged_out(page):
                     raise ReauthenticationRequired("authenticated SynkedUP session is required")
+                current_start = str((dashboard or {}).get("date_start", ""))
+                current_end = str((dashboard or {}).get("date_end", ""))
                 cached = _load_dashboard_job_cache(
                     origin=self.origin,
-                    date_start=str((dashboard or {}).get("date_start", "")),
-                    date_end=str((dashboard or {}).get("date_end", "")),
+                    date_start=current_start,
+                    date_end=current_end,
                 )
+                if cached is None:
+                    cached = _load_dashboard_job_cache(
+                        origin=self.origin,
+                        date_start=current_start,
+                        date_end=current_end,
+                        allow_range_mismatch=True,
+                    )
                 if cached is None:
                     raise RuntimeError("dashboard labor job list did not load")
                 dashboard = cached
-                dashboard_source = "same-range cache"
-                alerts.append(
-                    "The dashboard job-costing panel was unavailable, so this scan used "
-                    "the most recent job list captured for the same dashboard date range."
-                )
+                if cached.get("cache_range_match"):
+                    dashboard_source = "same-range cache"
+                    alerts.append(
+                        "The dashboard job-costing panel was unavailable, so this scan used "
+                        "the most recent job list captured for the same dashboard date range."
+                    )
+                else:
+                    dashboard_source = "latest verified cache"
+                    alerts.append(
+                        "The dashboard job-costing panel was unavailable for the current date "
+                        "range. This scan used the most recent verified dashboard job list and "
+                        "re-read each listed project live."
+                    )
             else:
                 try:
                     _write_dashboard_job_cache(dashboard)

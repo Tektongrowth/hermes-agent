@@ -100,7 +100,7 @@ mcp_servers:
         - composio_execute
   cjs-synkedup:
     url: http://127.0.0.1:9342/mcp
-    timeout: 60
+    timeout: 360
     connect_timeout: 20
     supports_parallel_tool_calls: false
     tools:
