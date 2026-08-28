@@ -1,9 +1,13 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from deployments.cjs_whiteout.connectors import cjs_composio_mcp as bridge
+
+
+DEPLOYMENT_ROOT = Path(__file__).parents[2] / "deployments" / "cjs_whiteout"
 
 
 @pytest.fixture(autouse=True)
@@ -89,3 +93,177 @@ def test_missing_account_fails_closed(monkeypatch):
     monkeypatch.delenv("CJS_COMPOSIO_ACCOUNT")
     with pytest.raises(bridge.BridgeConfigurationError, match="pinned CJS"):
         bridge._account_selector()
+
+
+def test_cli_parser_accepts_json_with_trailing_download_status():
+    result = bridge._parse_cli_output(
+        '  {"successful":true,"data":{"name":"plan.pdf"}}\n'
+        'Downloaded file successfully to the temporary store.\n'
+    )
+    assert result == {"successful": True, "data": {"name": "plan.pdf"}}
+
+
+def test_cli_parser_preserves_plain_text_fallback():
+    assert bridge._parse_cli_output("plain output\n") == {"output": "plain output"}
+
+
+def test_structured_results_are_recursively_redacted():
+    safe = bridge._sanitize_result(
+        {"data": [{"url": "https://example.com/?token=secret-value"}]}
+    )
+    assert "secret-value" not in safe["data"][0]["url"]
+    assert "[REDACTED]" in safe["data"][0]["url"]
+
+
+def test_run_parses_signed_url_before_redacting_plain_text(monkeypatch):
+    signed_url = (
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file"
+        "?X-Amz-Credential=temporary%2Fcredential&X-Amz-Signature=abc"
+    )
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "successful": True,
+                    "data": {
+                        "downloaded_file_content": {
+                            "mimetype": "application/pdf",
+                            "name": "plan.pdf",
+                            "s3url": signed_url,
+                        }
+                    },
+                }
+            )
+            + "\nDownload complete\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    result = bridge._run(
+        ["execute", "GOOGLEDRIVE_DOWNLOAD_FILE"],
+        sanitize_result=False,
+    )
+    assert result["successful"] is True
+    assert result["data"]["downloaded_file_content"]["s3url"] == signed_url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://temp.0123456789abcdef.r2.cloudflarestorage.com/file?sig=x",
+        "https://example.com/file?sig=x",
+        "https://user@temp.0123456789abcdef.r2.cloudflarestorage.com/file?sig=x",
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file",
+    ],
+)
+def test_pdf_download_url_rejects_unapproved_locations(url):
+    with pytest.raises(bridge.BridgeRequestError, match="unapproved"):
+        bridge._validate_composio_file_url(url)
+
+
+def test_pdf_download_url_accepts_composio_temporary_storage():
+    url = "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
+    assert bridge._validate_composio_file_url(url) == url
+
+
+def test_pdf_payload_must_be_successful_pdf():
+    with pytest.raises(bridge.BridgeRequestError, match="not a PDF"):
+        bridge._extract_pdf_download(
+            {
+                "successful": True,
+                "data": {
+                    "mimeType": "text/plain",
+                    "downloaded_file_content": {
+                        "mimetype": "text/plain",
+                        "name": "notes.txt",
+                        "s3url": "https://example.com/file",
+                    },
+                },
+            }
+        )
+
+
+def test_pdf_page_count_has_a_hard_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        bridge,
+        "_run_pdf_helper",
+        lambda args, timeout: SimpleNamespace(stdout="Pages:           11\n"),
+    )
+    with pytest.raises(bridge.BridgeRequestError, match="page limit"):
+        bridge._pdf_page_count(tmp_path / "document.pdf")
+
+
+def test_read_drive_pdf_returns_text_and_image_blocks(monkeypatch):
+    seen = {}
+    download_url = (
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file"
+        "?X-Amz-Signature=x"
+    )
+
+    def fake_run(
+        args,
+        timeout=bridge.DEFAULT_TIMEOUT_SECONDS,
+        sanitize_result=True,
+    ):
+        seen["args"] = args
+        seen["timeout"] = timeout
+        seen["sanitize_result"] = sanitize_result
+        return {
+            "successful": True,
+            "data": {
+                "mimeType": "application/pdf",
+                "name": "Top Down Plan.pdf",
+                "downloaded_file_content": {
+                    "mimetype": "application/pdf",
+                    "name": "Top Down Plan.pdf",
+                    "s3url": download_url,
+                },
+            },
+        }
+
+    def fake_download(url, destination):
+        assert url == download_url
+        destination.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    monkeypatch.setattr(bridge, "_download_pdf", fake_download)
+    monkeypatch.setattr(bridge, "_pdf_page_count", lambda path: 1)
+    monkeypatch.setattr(bridge, "_extract_pdf_text", lambda pdf, workdir: "embedded notes")
+    monkeypatch.setattr(
+        bridge,
+        "_render_pdf_pages",
+        lambda pdf, workdir, pages: [b"\xff\xd8\xffpage\xff\xd9"],
+    )
+
+    blocks = bridge.composio_read_drive_pdf("file_abc123")
+
+    assert [block.type for block in blocks] == ["text", "text", "image"]
+    assert "vision_analyze" in blocks[0].text
+    assert blocks[1].text.endswith("embedded notes")
+    assert blocks[2].mimeType == "image/jpeg"
+    assert seen["args"][:3] == ["execute", "GOOGLEDRIVE_DOWNLOAD_FILE", "--account"]
+    assert json.loads(seen["args"][-1]) == {"fileId": "file_abc123"}
+    assert seen["timeout"] == 180
+    assert seen["sanitize_result"] is False
+
+
+def test_read_drive_pdf_rejects_malformed_file_id(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("Composio must not be called"),
+    )
+    with pytest.raises(bridge.BridgeRequestError, match="canonical Google Drive"):
+        bridge.composio_read_drive_pdf("../bad")
+
+
+def test_pdf_reader_is_wired_into_mason_config_and_instructions():
+    config = (DEPLOYMENT_ROOT / "config" / "mason-config.example.yaml").read_text(
+        encoding="utf-8"
+    )
+    soul = (DEPLOYMENT_ROOT / "SOUL.md").read_text(encoding="utf-8")
+    assert config.count("- composio_read_drive_pdf") == 1
+    assert "Use `composio_read_drive_pdf`" in soul
+    assert "call `vision_analyze` on every page" in soul

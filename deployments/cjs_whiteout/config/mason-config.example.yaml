@@ -88,6 +88,7 @@ mcp_servers:
         - composio_connection_status
         - composio_search
         - composio_tool_schema
+        - composio_read_drive_pdf
         - composio_execute
   cjs-synkedup:
     url: http://127.0.0.1:9342/mcp
