@@ -40,7 +40,19 @@ def test_alyssa_has_complete_admin_read_profile_and_defaults_deny():
         "synkedup-operations-read",
         "synkedup-sales-read",
         "synkedup-financial-read",
+        "composio-approved",
+        "vision",
+        "cronjob",
     }
+
+
+def test_mason_executes_drive_comparisons_and_supports_reminders():
+    soul = _read(ROOT / "SOUL.md")
+    assert "Never reply with a plan" in soul
+    assert "Do not stop after saying what you will compare" in soul
+    assert "search for the exact project and destination first" in soul
+    assert "call `cronjob`" in soul
+    assert "A checklist can stay in the requester's Discord conversation" in soul
 
 
 def test_browser_and_mcp_ports_are_bound_to_loopback():

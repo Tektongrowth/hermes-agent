@@ -54,10 +54,16 @@ platform_principal_toolsets:
     admin_users:
     - '1412944834372829245'
     - '1541580058152665199'
-    default: &approved-toolsets
-    - '*'
+    default: []
     users:
-      '1412944834372829245': *approved-toolsets
+      '1412944834372829245': &approved-toolsets
+      - synkedup-reference-read
+      - synkedup-operations-read
+      - synkedup-sales-read
+      - synkedup-financial-read
+      - composio-approved
+      - vision
+      - cronjob
       '1541580058152665199': *approved-toolsets
     roles: {}
     user_action_policy:
