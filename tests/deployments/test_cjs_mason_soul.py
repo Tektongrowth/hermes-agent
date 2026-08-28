@@ -54,6 +54,7 @@ def test_mason_soul_requires_complete_job_number_comparison() -> None:
     soul = SOUL_PATH.read_text(encoding="utf-8").casefold()
 
     assert "match jobs by exact job number" in soul
+    assert "pass every synkedup job number in `job_numbers`" in soul
     assert "estimated hours" in soul
     assert "actual hours" in soul
     assert "final net profit %" in soul

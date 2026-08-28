@@ -344,6 +344,8 @@ def test_read_drive_spreadsheet_exports_and_returns_bounded_rows(monkeypatch):
         sheet.title = "Project Review"
         sheet.append(["Job Number", "Estimated Hours", "Actual Hours", "Net Profit %"])
         sheet.append(["AY-659", 379, 580.37, 0.2])
+        sheet.append(["MS-049", 36.5, 40.05, 0.2701])
+        sheet.append(["AY-900", 0, 0, 0.1567])
         workbook.save(destination)
         workbook.close()
 
@@ -367,6 +369,24 @@ def test_read_drive_spreadsheet_exports_and_returns_bounded_rows(monkeypatch):
     }
     assert seen["timeout"] == 180
     assert seen["sanitize_result"] is False
+
+    filtered = bridge.composio_read_drive_spreadsheet(
+        "file_abc123",
+        job_numbers=["AY-900", "AY-659", "MS-999"],
+    )
+    assert filtered["filtered_job_numbers"] == ["AY-659", "AY-900", "MS-999"]
+    assert filtered["matched_job_numbers"] == ["AY-659", "AY-900"]
+    assert filtered["missing_job_numbers"] == ["MS-999"]
+    assert filtered["sheets"][0]["rows"] == [
+        ["Job Number", "Estimated Hours", "Actual Hours", "Net Profit %"],
+        ["AY-659", 379, 580.37, 0.2],
+        ["AY-900", 0, 0, 0.1567],
+    ]
+
+
+def test_spreadsheet_job_number_filter_rejects_non_cjs_values():
+    with pytest.raises(bridge.BridgeRequestError, match="canonical CJS job numbers"):
+        bridge._validated_job_numbers(["../bad"])
 
 
 def test_spreadsheet_export_requires_xlsx_payload():
