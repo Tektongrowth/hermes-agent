@@ -17,6 +17,8 @@ SERVICE_DIR="$REPO_ROOT/deployments/cjs_whiteout/systemd"
 CONFIG_SOURCE="$REPO_ROOT/deployments/cjs_whiteout/config/mason-config.example.yaml"
 SOUL_SOURCE="$REPO_ROOT/deployments/cjs_whiteout/SOUL.md"
 BIN_SOURCE="$REPO_ROOT/deployments/cjs_whiteout/bin"
+SKILLS_SOURCE="$REPO_ROOT/deployments/cjs_whiteout/skills"
+HOOKS_SOURCE="$REPO_ROOT/deployments/cjs_whiteout/hooks"
 
 if ! git -C "$REPO_ROOT" cat-file -e "$RELEASE_REF^{commit}"; then
   echo "release ref is not a commit: $RELEASE_REF" >&2
@@ -54,6 +56,7 @@ install -d -m 0750 -o cjs-synkedup -g cjs-synkedup /var/lib/cjs-synkedup /var/li
 install -d -m 0770 -o cjs-synkedup -g cjs-synkedup /var/log/cjs-synkedup
 install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout /var/lib/cjs-whiteout/hermes
 install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout/hermes/state /var/lib/cjs-whiteout/hermes/logs
+install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks
 
 if [[ ! -d "$RELEASE_DIR" ]]; then
   install -d -m 0755 -o root -g root "$RELEASE_DIR"
@@ -92,6 +95,41 @@ else
 fi
 backup_path /var/lib/cjs-whiteout/hermes/SOUL.md
 install -m 0640 -o nick -g cjs-synkedup "$SOUL_SOURCE" /var/lib/cjs-whiteout/hermes/SOUL.md
+backup_path /var/lib/cjs-whiteout/hermes/skills
+backup_path /var/lib/cjs-whiteout/hermes/hooks
+rm -rf /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks
+install -d -m 0750 -o nick -g cjs-synkedup /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks
+cp -a "$SKILLS_SOURCE/." /var/lib/cjs-whiteout/hermes/skills/
+cp -a "$HOOKS_SOURCE/." /var/lib/cjs-whiteout/hermes/hooks/
+chown -R nick:cjs-synkedup /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks
+find /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks -type d -exec chmod 0750 {} +
+find /var/lib/cjs-whiteout/hermes/skills /var/lib/cjs-whiteout/hermes/hooks -type f -exec chmod 0640 {} +
+HERMES_HOME=/var/lib/cjs-whiteout/hermes /home/nick/.hermes/hermes-agent/venv/bin/python - <<'PY'
+from pathlib import Path
+
+import yaml
+
+from tools.skills_tool import _find_all_skills
+
+allowed = {
+    "daily-operations-briefing",
+    "cjs-job-lookup",
+    "whiteout-account-lookup",
+    "job-cost-project-review",
+    "schedule-crew-planning",
+    "hit-lists-reminders",
+}
+config_path = Path("/var/lib/cjs-whiteout/hermes/config.yaml")
+config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+discovered = {skill["name"] for skill in _find_all_skills(skip_disabled=True)}
+missing = allowed - discovered
+if missing:
+    raise SystemExit(f"missing reviewed Mason skills: {sorted(missing)}")
+config.setdefault("skills", {})["disabled"] = sorted(discovered - allowed)
+config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+PY
+chown nick:cjs-synkedup /var/lib/cjs-whiteout/hermes/config.yaml
+chmod 0640 /var/lib/cjs-whiteout/hermes/config.yaml
 
 systemctl daemon-reload
 systemctl enable --now cjs-synkedup-display.service

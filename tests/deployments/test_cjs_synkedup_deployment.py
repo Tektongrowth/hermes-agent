@@ -46,6 +46,7 @@ def test_alyssa_has_complete_admin_read_profile_and_defaults_deny():
         "vision",
         "cronjob",
         "todo",
+        "skills",
     }
 
 

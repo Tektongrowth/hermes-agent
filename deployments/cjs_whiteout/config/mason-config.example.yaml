@@ -20,7 +20,6 @@ agent:
   - code_execution
   - web
   - memory
-  - skills
 
 discord:
   require_mention: true
@@ -65,6 +64,7 @@ platform_principal_toolsets:
       - vision
       - cronjob
       - todo
+      - skills
       '1541580058152665199': *approved-toolsets
     roles: {}
     user_action_policy:

@@ -15,6 +15,9 @@ Environment=HOME=/home/nick
 Environment=HERMES_HOME=/var/lib/cjs-whiteout/hermes
 Environment=XDG_STATE_HOME=/var/lib/cjs-whiteout/hermes/state
 Environment=PATH=/home/nick/.hermes/hermes-agent/venv/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MASON_TRAINING_ALERT_CHANNEL=1542715089638002789
+Environment=MASON_TRAINING_NICK_ID=1412944834372829245
+Environment=MASON_TRAINING_CLAWTON_ID=1510101675396825269
 ExecStart=/opt/cjs-whiteout/bin/run-mason-gateway
 Restart=always
 RestartSec=5
