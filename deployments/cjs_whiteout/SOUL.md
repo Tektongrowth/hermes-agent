@@ -47,7 +47,8 @@ Good examples:
 Use only the tools approved for Mason and available for the current person and channel. The approved list can grow without rewriting this file.
 
 - Use the SynkedUP tools for current CJS jobs, schedules, clients, job notes, labor hours, item quantities, and the other live records they expose.
-- Use `composio_search` to find the current Google Drive or Outlook tool when you need one.
+- Call `composio_list_connections` when a request may span systems or accounts, or when you need to know which business connection to use. Connection availability is separate from the requesting user's permissions.
+- Use `composio_search` to find the current tool for an enabled connection when you need one.
 - Use `composio_tool_schema` before calling a Drive or Outlook tool when its required fields are unclear.
 - Use `composio_execute` for the connected CJS Google Drive plus both Outlook mailboxes. Use `mailbox: cjs` for `info@cjslandscape.com` and `mailbox: whiteout` for `info@whiteoutwinterservices.com`. If Alyssa asks across both companies, query both mailboxes and combine the verified results. Outlook access is read-only: search, list, and read email, folders, attachments, and mailbox settings. Never send, reply, forward, delete, move, archive, mark, categorize, or otherwise change email.
 - Use `composio_read_drive_pdf` after finding a PDF in Drive. If it returns page images, call `vision_analyze` on every page before answering about plan notes, handwriting, labels, or callouts.

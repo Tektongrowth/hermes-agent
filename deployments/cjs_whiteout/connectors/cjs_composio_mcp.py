@@ -50,6 +50,7 @@ XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.she
 DEFAULT_AUDIT_PATH = "/var/lib/cjs-whiteout/hermes/logs/composio-audit.jsonl"
 TOOLKIT_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 TOOL_SLUG_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,199}$")
+_SAFE_CONNECTION_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 DRIVE_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 CJS_JOB_NUMBER_RE = re.compile(r"^(?:AY|MS)-[0-9]+(?:\.[0-9]+)?$")
 COMPOSIO_FILE_HOST_RE = re.compile(
@@ -75,32 +76,105 @@ class BridgeRequestError(RuntimeError):
 
 
 def _csv_env(name: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in os.getenv(name, "").split(",") if part.strip())
+    return tuple(
+        part.strip() for part in os.getenv(name, "").split(",") if part.strip()
+    )
+
+
+def _connection_registry() -> dict[str, dict[str, str]]:
+    raw = os.getenv("CJS_COMPOSIO_CONNECTIONS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeConfigurationError(
+            "the CJS Composio connection registry is invalid"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise BridgeConfigurationError(
+            "the CJS Composio connection registry is invalid"
+        )
+    registry: dict[str, dict[str, str]] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not _SAFE_CONNECTION_KEY_RE.fullmatch(key):
+            raise BridgeConfigurationError(
+                "the CJS Composio connection registry has an invalid key"
+            )
+        if not isinstance(value, dict):
+            raise BridgeConfigurationError(
+                "the CJS Composio connection registry has an invalid entry"
+            )
+        toolkit = str(value.get("toolkit", "")).strip().lower()
+        account = str(value.get("account", "")).strip()
+        label = str(value.get("label", key)).strip()
+        if (
+            not TOOLKIT_RE.fullmatch(toolkit)
+            or not account
+            or len(account) > 200
+            or any(ch.isspace() for ch in account)
+            or not label
+            or len(label) > 120
+        ):
+            raise BridgeConfigurationError(
+                "the CJS Composio connection registry has an invalid entry"
+            )
+        registry[key] = {"toolkit": toolkit, "account": account, "label": label}
+    return registry
 
 
 def _approved_toolkits() -> tuple[str, ...]:
-    toolkits = _csv_env("CJS_COMPOSIO_TOOLKITS")
+    toolkits = tuple(
+        dict.fromkeys((
+            *_csv_env("CJS_COMPOSIO_TOOLKITS"),
+            *(v["toolkit"] for v in _connection_registry().values()),
+        ))
+    )
     if not toolkits or any(not TOOLKIT_RE.fullmatch(toolkit) for toolkit in toolkits):
-        raise BridgeConfigurationError("approved Composio toolkit configuration is missing or invalid")
+        raise BridgeConfigurationError(
+            "approved Composio toolkit configuration is missing or invalid"
+        )
     return toolkits
 
 
 def _approved_prefixes() -> tuple[str, ...]:
-    prefixes = tuple(prefix.upper() for prefix in _csv_env("CJS_COMPOSIO_TOOL_PREFIXES"))
-    if not prefixes or any(not re.fullmatch(r"[A-Z][A-Z0-9]{1,63}", prefix) for prefix in prefixes):
-        raise BridgeConfigurationError("approved Composio tool prefix configuration is missing or invalid")
+    prefixes = tuple(
+        dict.fromkeys((
+            *(prefix.upper() for prefix in _csv_env("CJS_COMPOSIO_TOOL_PREFIXES")),
+            *(value["toolkit"].upper() for value in _connection_registry().values()),
+        ))
+    )
+    if not prefixes or any(
+        not re.fullmatch(r"[A-Z][A-Z0-9]{1,63}", prefix) for prefix in prefixes
+    ):
+        raise BridgeConfigurationError(
+            "approved Composio tool prefix configuration is missing or invalid"
+        )
     return prefixes
 
 
-def _account_selector(tool_slug: str = "", mailbox: str = "cjs") -> str:
+def _account_selector(
+    tool_slug: str = "",
+    mailbox: str = "cjs",
+    connection: str = "",
+) -> str:
     prefix = str(tool_slug or "").strip().upper().split("_", 1)[0]
+    if connection:
+        entry = _connection_registry().get(str(connection).strip().lower())
+        if entry is None:
+            raise BridgeRequestError("connection is not in the approved CJS registry")
+        if prefix and prefix != entry["toolkit"].upper():
+            raise BridgeRequestError("tool does not match the selected connection")
+        return entry["account"]
     mailbox_key = str(mailbox or "cjs").strip().lower()
     if mailbox_key not in {"cjs", "whiteout"}:
         raise BridgeRequestError("mailbox must be cjs or whiteout")
     if prefix == "OUTLOOK" and mailbox_key == "whiteout":
         env_name = "CJS_COMPOSIO_ACCOUNT_OUTLOOK_WHITEOUT"
     else:
-        env_name = f"CJS_COMPOSIO_ACCOUNT_{prefix}" if prefix else "CJS_COMPOSIO_ACCOUNT"
+        env_name = (
+            f"CJS_COMPOSIO_ACCOUNT_{prefix}" if prefix else "CJS_COMPOSIO_ACCOUNT"
+        )
     selector = os.getenv(env_name, "").strip()
     if not selector and prefix == "GOOGLEDRIVE":
         selector = os.getenv("CJS_COMPOSIO_ACCOUNT", "").strip()
@@ -124,12 +198,16 @@ def _validate_tool_slug(tool_slug: str) -> str:
     if not TOOL_SLUG_RE.fullmatch(slug):
         raise BridgeRequestError("tool_slug must be an uppercase Composio tool slug")
     if not any(slug.startswith(prefix + "_") for prefix in _approved_prefixes()):
-        raise BridgeRequestError("tool_slug is outside the approved CJS Composio toolkits")
+        raise BridgeRequestError(
+            "tool_slug is outside the approved CJS Composio toolkits"
+        )
     return slug
 
 
 def _sanitize_text(text: str) -> str:
-    clean = SENSITIVE_TEXT_RE.sub(lambda match: match.group(1) + match.group(2) + "[REDACTED]", text)
+    clean = SENSITIVE_TEXT_RE.sub(
+        lambda match: match.group(1) + match.group(2) + "[REDACTED]", text
+    )
     return clean[:MAX_OUTPUT_CHARS]
 
 
@@ -206,7 +284,10 @@ def _extract_pdf_download(result: Any) -> tuple[str, str]:
     if not isinstance(content, dict):
         raise BridgeRequestError("Composio did not return downloadable PDF content")
     mimetype = content.get("mimetype") or data.get("mimeType")
-    if mimetype != "application/pdf" or data.get("mimeType") not in {None, "application/pdf"}:
+    if mimetype != "application/pdf" or data.get("mimeType") not in {
+        None,
+        "application/pdf",
+    }:
         raise BridgeRequestError("the requested Drive file is not a PDF")
     url = content.get("s3url")
     if not isinstance(url, str) or not url:
@@ -219,15 +300,26 @@ def _extract_pdf_download(result: Any) -> tuple[str, str]:
 
 def _extract_spreadsheet_export(result: Any) -> tuple[str, str]:
     if not isinstance(result, dict) or result.get("successful") is not True:
-        raise BridgeRequestError("Composio did not return a successful spreadsheet export")
+        raise BridgeRequestError(
+            "Composio did not return a successful spreadsheet export"
+        )
     data = result.get("data")
     if not isinstance(data, dict):
-        raise BridgeRequestError("Composio returned an invalid spreadsheet export payload")
+        raise BridgeRequestError(
+            "Composio returned an invalid spreadsheet export payload"
+        )
     content = data.get("file")
     if not isinstance(content, dict):
-        raise BridgeRequestError("Composio did not return downloadable spreadsheet content")
-    if content.get("mimetype") != XLSX_MIMETYPE or data.get("export_mime_type") != XLSX_MIMETYPE:
-        raise BridgeRequestError("the requested Drive file is not an exported spreadsheet")
+        raise BridgeRequestError(
+            "Composio did not return downloadable spreadsheet content"
+        )
+    if (
+        content.get("mimetype") != XLSX_MIMETYPE
+        or data.get("export_mime_type") != XLSX_MIMETYPE
+    ):
+        raise BridgeRequestError(
+            "the requested Drive file is not an exported spreadsheet"
+        )
     size = data.get("size_bytes")
     if isinstance(size, int) and (size < 1 or size > MAX_SPREADSHEET_BYTES):
         raise BridgeRequestError("the spreadsheet is outside Mason's safe size limit")
@@ -245,7 +337,9 @@ def _validate_composio_file_url(url: str) -> str:
         parsed = urllib.parse.urlsplit(url)
         port = parsed.port
     except (TypeError, ValueError) as exc:
-        raise BridgeRequestError("Composio returned an invalid file download URL") from exc
+        raise BridgeRequestError(
+            "Composio returned an invalid file download URL"
+        ) from exc
     hostname = (parsed.hostname or "").lower()
     if (
         parsed.scheme != "https"
@@ -275,7 +369,9 @@ def _download_pdf(url: str, destination: Path) -> None:
         with opener.open(request, timeout=60) as response:
             final_url = response.geturl()
             if final_url != approved_url:
-                raise BridgeRequestError("the PDF download attempted an unapproved redirect")
+                raise BridgeRequestError(
+                    "the PDF download attempted an unapproved redirect"
+                )
             content_type = response.headers.get_content_type().lower()
             if content_type not in {"application/pdf", "application/octet-stream"}:
                 raise BridgeRequestError("the downloaded Drive file is not a PDF")
@@ -284,9 +380,13 @@ def _download_pdf(url: str, destination: Path) -> None:
                 try:
                     declared_size = int(content_length)
                 except ValueError as exc:
-                    raise BridgeRequestError("the PDF download reported an invalid size") from exc
+                    raise BridgeRequestError(
+                        "the PDF download reported an invalid size"
+                    ) from exc
                 if declared_size < 1 or declared_size > MAX_PDF_BYTES:
-                    raise BridgeRequestError("the PDF is outside Mason's safe size limit")
+                    raise BridgeRequestError(
+                        "the PDF is outside Mason's safe size limit"
+                    )
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -296,7 +396,9 @@ def _download_pdf(url: str, destination: Path) -> None:
                 chunks.append(chunk)
                 total += len(chunk)
                 if total > MAX_PDF_BYTES:
-                    raise BridgeRequestError("the PDF is outside Mason's safe size limit")
+                    raise BridgeRequestError(
+                        "the PDF is outside Mason's safe size limit"
+                    )
     except BridgeRequestError:
         raise
     except Exception as exc:
@@ -312,24 +414,35 @@ def _download_spreadsheet(url: str, destination: Path) -> None:
     approved_url = _validate_composio_file_url(url)
     request = urllib.request.Request(
         approved_url,
-        headers={"User-Agent": "cjs-mason-spreadsheet-reader/1.0", "Accept": XLSX_MIMETYPE},
+        headers={
+            "User-Agent": "cjs-mason-spreadsheet-reader/1.0",
+            "Accept": XLSX_MIMETYPE,
+        },
     )
     opener = urllib.request.build_opener(_NoRedirectHandler())
     try:
         with opener.open(request, timeout=60) as response:
             if response.geturl() != approved_url:
-                raise BridgeRequestError("the spreadsheet download attempted an unapproved redirect")
+                raise BridgeRequestError(
+                    "the spreadsheet download attempted an unapproved redirect"
+                )
             content_type = response.headers.get_content_type().lower()
             if content_type not in {XLSX_MIMETYPE, "application/octet-stream"}:
-                raise BridgeRequestError("the downloaded Drive file is not a spreadsheet")
+                raise BridgeRequestError(
+                    "the downloaded Drive file is not a spreadsheet"
+                )
             content_length = response.headers.get("Content-Length")
             if content_length:
                 try:
                     declared_size = int(content_length)
                 except ValueError as exc:
-                    raise BridgeRequestError("the spreadsheet download reported an invalid size") from exc
+                    raise BridgeRequestError(
+                        "the spreadsheet download reported an invalid size"
+                    ) from exc
                 if declared_size < 1 or declared_size > MAX_SPREADSHEET_BYTES:
-                    raise BridgeRequestError("the spreadsheet is outside Mason's safe size limit")
+                    raise BridgeRequestError(
+                        "the spreadsheet is outside Mason's safe size limit"
+                    )
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -338,7 +451,9 @@ def _download_spreadsheet(url: str, destination: Path) -> None:
                     break
                 total += len(chunk)
                 if total > MAX_SPREADSHEET_BYTES:
-                    raise BridgeRequestError("the spreadsheet is outside Mason's safe size limit")
+                    raise BridgeRequestError(
+                        "the spreadsheet is outside Mason's safe size limit"
+                    )
                 chunks.append(chunk)
     except BridgeRequestError:
         raise
@@ -346,7 +461,9 @@ def _download_spreadsheet(url: str, destination: Path) -> None:
         raise BridgeRequestError("the spreadsheet download failed") from exc
     payload = b"".join(chunks)
     if not payload.startswith(b"PK\x03\x04"):
-        raise BridgeRequestError("the downloaded Drive file failed spreadsheet validation")
+        raise BridgeRequestError(
+            "the downloaded Drive file failed spreadsheet validation"
+        )
     destination.write_bytes(payload)
     os.chmod(destination, 0o600)
 
@@ -366,9 +483,13 @@ def _validated_job_numbers(job_numbers: list[str] | None) -> set[str]:
     if job_numbers is None:
         return set()
     if not isinstance(job_numbers, list) or len(job_numbers) > 100:
-        raise BridgeRequestError("job_numbers must contain no more than 100 CJS job numbers")
+        raise BridgeRequestError(
+            "job_numbers must contain no more than 100 CJS job numbers"
+        )
     normalized = {str(value or "").strip().upper() for value in job_numbers}
-    if not normalized or any(not CJS_JOB_NUMBER_RE.fullmatch(value) for value in normalized):
+    if not normalized or any(
+        not CJS_JOB_NUMBER_RE.fullmatch(value) for value in normalized
+    ):
         raise BridgeRequestError("job_numbers must contain canonical CJS job numbers")
     return normalized
 
@@ -440,7 +561,9 @@ def _pdf_binary(name: str) -> str:
     return str(path)
 
 
-def _run_pdf_helper(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_pdf_helper(
+    args: list[str], *, timeout: int
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         args,
         stdin=subprocess.DEVNULL,
@@ -536,7 +659,10 @@ def _native_full_page_jpegs(
         image_width = width * 72 / x_ppi
         image_height = height * 72 / y_ppi
         tolerance = max(2.0, page_width * 0.01, page_height * 0.01)
-        if abs(image_width - page_width) > tolerance or abs(image_height - page_height) > tolerance:
+        if (
+            abs(image_width - page_width) > tolerance
+            or abs(image_height - page_height) > tolerance
+        ):
             return None
 
     output_prefix = workdir / "native-page"
@@ -545,9 +671,8 @@ def _native_full_page_jpegs(
         timeout=120,
     )
     extracted_paths = sorted(workdir.glob("native-page-*"))
-    if (
-        len(extracted_paths) != pages
-        or any(path.suffix.lower() not in {".jpg", ".jpeg"} for path in extracted_paths)
+    if len(extracted_paths) != pages or any(
+        path.suffix.lower() not in {".jpg", ".jpeg"} for path in extracted_paths
     ):
         return None
     return extracted_paths
@@ -584,10 +709,14 @@ def _render_pdf_pages(pdf_path: Path, workdir: Path, pages: int) -> list[bytes]:
         if not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9"):
             raise BridgeRequestError("a rendered PDF page failed image validation")
         if len(payload) > MAX_RENDERED_PAGE_BYTES:
-            raise BridgeRequestError("a rendered PDF page is outside Mason's safe size limit")
+            raise BridgeRequestError(
+                "a rendered PDF page is outside Mason's safe size limit"
+            )
         total += len(payload)
         if total > MAX_RENDERED_TOTAL_BYTES:
-            raise BridgeRequestError("the rendered PDF is outside Mason's safe size limit")
+            raise BridgeRequestError(
+                "the rendered PDF is outside Mason's safe size limit"
+            )
         rendered.append(payload)
     return rendered
 
@@ -599,6 +728,7 @@ def _audit(
     *,
     remote_tool: str = "",
     mailbox: str = "cjs",
+    connection: str = "",
 ) -> None:
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -608,14 +738,16 @@ def _audit(
         "status": status,
         "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
         "account_hash": hashlib.sha256(
-            _account_selector(remote_tool, mailbox).encode()
+            _account_selector(remote_tool, mailbox, connection).encode()
         ).hexdigest()[:12],
     }
     path = Path(os.getenv("CJS_COMPOSIO_AUDIT_PATH", DEFAULT_AUDIT_PATH))
     with _AUDIT_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            )
         os.chmod(path, 0o600)
 
 
@@ -632,11 +764,32 @@ def _bounded_arguments(arguments: dict[str, Any]) -> str:
 
 
 @mcp.tool()
+def composio_list_connections() -> dict[str, Any]:
+    """List every enabled CJS/Whiteout connection Mason can route to.
+
+    Connection availability is separate from the current Discord user's tool permissions.
+    Use the returned connection key with ``composio_tool_schema`` or ``composio_execute``.
+    """
+    registry = _connection_registry()
+    return {
+        "connections": [
+            {"key": key, "toolkit": value["toolkit"], "label": value["label"]}
+            for key, value in sorted(registry.items())
+        ]
+    }
+
+
+@mcp.tool()
 def composio_connection_status() -> dict[str, Any]:
     """Verify the pinned CJS Composio account and approved toolkit connection."""
     started = time.monotonic()
     try:
-        data = _run(["connections", "list", "--toolkit", ",".join(_approved_toolkits())])
+        data = _run([
+            "connections",
+            "list",
+            "--toolkit",
+            ",".join(_approved_toolkits()),
+        ])
         expected = _account_selector()
         active = []
         if isinstance(data, dict):
@@ -649,7 +802,8 @@ def composio_connection_status() -> dict[str, Any]:
                             "word_id": row.get("word_id"),
                             "alias": row.get("alias"),
                             "status": row.get("status"),
-                            "pinned": expected in {row.get("word_id"), row.get("alias"), row.get("id")},
+                            "pinned": expected
+                            in {row.get("word_id"), row.get("alias"), row.get("id")},
                         }
                         for row in rows
                         if isinstance(row, dict) and row.get("status") == "ACTIVE"
@@ -670,16 +824,14 @@ def composio_search(query: str, limit: StrictLimit = 10) -> Any:
     if not clean_query or len(clean_query) > MAX_QUERY_LENGTH:
         raise BridgeRequestError("query must be between 1 and 500 characters")
     try:
-        result = _run(
-            [
-                "search",
-                clean_query,
-                "--toolkits",
-                ",".join(_approved_toolkits()),
-                "--limit",
-                str(limit),
-            ]
-        )
+        result = _run([
+            "search",
+            clean_query,
+            "--toolkits",
+            ",".join(_approved_toolkits()),
+            "--limit",
+            str(limit),
+        ])
         _audit("composio_search", "ok", started)
         return result
     except Exception:
@@ -691,18 +843,37 @@ def composio_search(query: str, limit: StrictLimit = 10) -> Any:
 def composio_tool_schema(
     tool_slug: str,
     mailbox: Literal["cjs", "whiteout"] = "cjs",
+    connection: str = "",
 ) -> Any:
     """Read the input schema for one tool in an approved Composio toolkit."""
     started = time.monotonic()
     slug = _validate_tool_slug(tool_slug)
     try:
-        result = _run(
-            ["execute", slug, "--account", _account_selector(slug, mailbox), "--get-schema"]
+        result = _run([
+            "execute",
+            slug,
+            "--account",
+            _account_selector(slug, mailbox, connection),
+            "--get-schema",
+        ])
+        _audit(
+            "composio_tool_schema",
+            "ok",
+            started,
+            remote_tool=slug,
+            mailbox=mailbox,
+            connection=connection,
         )
-        _audit("composio_tool_schema", "ok", started, remote_tool=slug, mailbox=mailbox)
         return result
     except Exception:
-        _audit("composio_tool_schema", "error", started, remote_tool=slug, mailbox=mailbox)
+        _audit(
+            "composio_tool_schema",
+            "error",
+            started,
+            remote_tool=slug,
+            mailbox=mailbox,
+            connection=connection,
+        )
         raise
 
 
@@ -805,7 +976,10 @@ def composio_read_drive_spreadsheet(
                 "--account",
                 _account_selector(),
                 "--data",
-                _bounded_arguments({"fileId": clean_file_id, "mimeType": XLSX_MIMETYPE}),
+                _bounded_arguments({
+                    "fileId": clean_file_id,
+                    "mimeType": XLSX_MIMETYPE,
+                }),
             ],
             timeout=180,
             sanitize_result=False,
@@ -834,7 +1008,9 @@ def composio_read_drive_spreadsheet(
             "truncated": truncated,
             "filtered_job_numbers": sorted(requested_job_numbers),
             "matched_job_numbers": matched_job_numbers,
-            "missing_job_numbers": sorted(requested_job_numbers.difference(matched_job_numbers)),
+            "missing_job_numbers": sorted(
+                requested_job_numbers.difference(matched_job_numbers)
+            ),
         }
         _audit(
             "composio_read_drive_spreadsheet",
@@ -859,6 +1035,7 @@ def composio_execute(
     arguments: dict[str, Any],
     dry_run: bool = False,
     mailbox: Literal["cjs", "whiteout"] = "cjs",
+    connection: str = "",
 ) -> Any:
     """Execute any tool in an approved toolkit against the pinned CJS account.
 
@@ -871,7 +1048,7 @@ def composio_execute(
         "execute",
         slug,
         "--account",
-        _account_selector(slug, mailbox),
+        _account_selector(slug, mailbox, connection),
         "--data",
         _bounded_arguments(arguments),
     ]
@@ -879,10 +1056,24 @@ def composio_execute(
         args.append("--dry-run")
     try:
         result = _run(args)
-        _audit("composio_execute", "ok", started, remote_tool=slug, mailbox=mailbox)
+        _audit(
+            "composio_execute",
+            "ok",
+            started,
+            remote_tool=slug,
+            mailbox=mailbox,
+            connection=connection,
+        )
         return result
     except Exception:
-        _audit("composio_execute", "error", started, remote_tool=slug, mailbox=mailbox)
+        _audit(
+            "composio_execute",
+            "error",
+            started,
+            remote_tool=slug,
+            mailbox=mailbox,
+            connection=connection,
+        )
         raise
 
 

@@ -88,6 +88,7 @@ mcp_servers:
       CJS_COMPOSIO_ACCOUNT: REPLACE_WITH_ACTIVE_CJS_GOOGLEDRIVE_ACCOUNT
       CJS_COMPOSIO_ACCOUNT_OUTLOOK: REPLACE_WITH_ACTIVE_CJS_OUTLOOK_ACCOUNT
       CJS_COMPOSIO_ACCOUNT_OUTLOOK_WHITEOUT: REPLACE_WITH_ACTIVE_WHITEOUT_OUTLOOK_ACCOUNT
+      CJS_COMPOSIO_CONNECTIONS: '{"cjs-drive":{"toolkit":"googledrive","account":"REPLACE_WITH_ACTIVE_CJS_GOOGLEDRIVE_ACCOUNT","label":"CJS Google Drive"},"cjs-outlook":{"toolkit":"outlook","account":"REPLACE_WITH_ACTIVE_CJS_OUTLOOK_ACCOUNT","label":"CJS Outlook"},"whiteout-outlook":{"toolkit":"outlook","account":"REPLACE_WITH_ACTIVE_WHITEOUT_OUTLOOK_ACCOUNT","label":"Whiteout Outlook"}}'
       CJS_COMPOSIO_AUDIT_PATH: /var/lib/cjs-whiteout/hermes/logs/composio-audit.jsonl
     tools:
       resources: false
@@ -95,6 +96,7 @@ mcp_servers:
       toolsets:
         composio-approved:
         - composio_connection_status
+        - composio_list_connections
         - composio_search
         - composio_tool_schema
         - composio_read_drive_pdf

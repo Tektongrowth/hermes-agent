@@ -18,6 +18,26 @@ def configured(monkeypatch, tmp_path):
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT", "googledrive_test-account")
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK", "outlook_test-account")
     monkeypatch.setenv("CJS_COMPOSIO_ACCOUNT_OUTLOOK_WHITEOUT", "whiteout_test-account")
+    monkeypatch.setenv(
+        "CJS_COMPOSIO_CONNECTIONS",
+        json.dumps({
+            "cjs-drive": {
+                "toolkit": "googledrive",
+                "account": "googledrive_test-account",
+                "label": "CJS Google Drive",
+            },
+            "cjs-outlook": {
+                "toolkit": "outlook",
+                "account": "outlook_test-account",
+                "label": "CJS Outlook",
+            },
+            "whiteout-outlook": {
+                "toolkit": "outlook",
+                "account": "whiteout_test-account",
+                "label": "Whiteout Outlook",
+            },
+        }),
+    )
     monkeypatch.setenv("CJS_COMPOSIO_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setattr(bridge, "_composio_binary", lambda: "/safe/composio")
 
@@ -36,7 +56,11 @@ def test_execute_pins_account_and_never_uses_shell(monkeypatch):
         {"name": "Dale Petersen", "parent_id": "approved-projects"},
     )
     assert result == {"successful": True}
-    assert seen["argv"][:3] == ["/safe/composio", "execute", "GOOGLEDRIVE_CREATE_FOLDER"]
+    assert seen["argv"][:3] == [
+        "/safe/composio",
+        "execute",
+        "GOOGLEDRIVE_CREATE_FOLDER",
+    ]
     assert seen["argv"][3:5] == ["--account", "googledrive_test-account"]
     assert json.loads(seen["argv"][6]) == {
         "name": "Dale Petersen",
@@ -77,6 +101,44 @@ def test_execute_can_route_outlook_to_the_whiteout_mailbox(monkeypatch):
         mailbox="whiteout",
     )
     assert seen["argv"][3:5] == ["--account", "whiteout_test-account"]
+
+
+def test_connection_registry_is_discoverable_without_exposing_account_selectors():
+    result = bridge.composio_list_connections()
+
+    assert result == {
+        "connections": [
+            {"key": "cjs-drive", "toolkit": "googledrive", "label": "CJS Google Drive"},
+            {"key": "cjs-outlook", "toolkit": "outlook", "label": "CJS Outlook"},
+            {
+                "key": "whiteout-outlook",
+                "toolkit": "outlook",
+                "label": "Whiteout Outlook",
+            },
+        ]
+    }
+    assert "test-account" not in repr(result)
+
+
+def test_execute_routes_through_an_enabled_connection_key(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout='{"successful":true}', stderr="")
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    bridge.composio_execute(
+        "OUTLOOK_QUERY_EMAILS",
+        {"folder": "inbox", "top": 1},
+        connection="whiteout-outlook",
+    )
+    assert seen["argv"][3:5] == ["--account", "whiteout_test-account"]
+
+
+def test_connection_key_rejects_cross_toolkit_routing():
+    with pytest.raises(bridge.BridgeRequestError, match="does not match"):
+        bridge._account_selector("GOOGLEDRIVE_FIND_FILE", connection="cjs-outlook")
 
 
 def test_tool_slug_rejects_shell_metacharacters():
@@ -140,7 +202,7 @@ def test_unknown_mailbox_fails_closed():
 def test_cli_parser_accepts_json_with_trailing_download_status():
     result = bridge._parse_cli_output(
         '  {"successful":true,"data":{"name":"plan.pdf"}}\n'
-        'Downloaded file successfully to the temporary store.\n'
+        "Downloaded file successfully to the temporary store.\n"
     )
     assert result == {"successful": True, "data": {"name": "plan.pdf"}}
 
@@ -150,9 +212,9 @@ def test_cli_parser_preserves_plain_text_fallback():
 
 
 def test_structured_results_are_recursively_redacted():
-    safe = bridge._sanitize_result(
-        {"data": [{"url": "https://example.com/?token=secret-value"}]}
-    )
+    safe = bridge._sanitize_result({
+        "data": [{"url": "https://example.com/?token=secret-value"}]
+    })
     assert "secret-value" not in safe["data"][0]["url"]
     assert "[REDACTED]" in safe["data"][0]["url"]
 
@@ -166,18 +228,16 @@ def test_run_parses_signed_url_before_redacting_plain_text(monkeypatch):
     def fake_run(argv, **kwargs):
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "successful": True,
-                    "data": {
-                        "downloaded_file_content": {
-                            "mimetype": "application/pdf",
-                            "name": "plan.pdf",
-                            "s3url": signed_url,
-                        }
-                    },
-                }
-            )
+            stdout=json.dumps({
+                "successful": True,
+                "data": {
+                    "downloaded_file_content": {
+                        "mimetype": "application/pdf",
+                        "name": "plan.pdf",
+                        "s3url": signed_url,
+                    }
+                },
+            })
             + "\nDownload complete\n",
             stderr="",
         )
@@ -206,25 +266,25 @@ def test_pdf_download_url_rejects_unapproved_locations(url):
 
 
 def test_pdf_download_url_accepts_composio_temporary_storage():
-    url = "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
+    url = (
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
+    )
     assert bridge._validate_composio_file_url(url) == url
 
 
 def test_pdf_payload_must_be_successful_pdf():
     with pytest.raises(bridge.BridgeRequestError, match="not a PDF"):
-        bridge._extract_pdf_download(
-            {
-                "successful": True,
-                "data": {
-                    "mimeType": "text/plain",
-                    "downloaded_file_content": {
-                        "mimetype": "text/plain",
-                        "name": "notes.txt",
-                        "s3url": "https://example.com/file",
-                    },
+        bridge._extract_pdf_download({
+            "successful": True,
+            "data": {
+                "mimeType": "text/plain",
+                "downloaded_file_content": {
+                    "mimetype": "text/plain",
+                    "name": "notes.txt",
+                    "s3url": "https://example.com/file",
                 },
-            }
-        )
+            },
+        })
 
 
 def test_pdf_page_count_has_a_hard_limit(monkeypatch, tmp_path):
@@ -293,8 +353,7 @@ def test_pdf_renderer_fallback_does_not_force_scale(monkeypatch, tmp_path):
 def test_read_drive_pdf_returns_text_and_image_blocks(monkeypatch):
     seen = {}
     download_url = (
-        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file"
-        "?X-Amz-Signature=x"
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
     )
 
     def fake_run(
@@ -325,7 +384,9 @@ def test_read_drive_pdf_returns_text_and_image_blocks(monkeypatch):
     monkeypatch.setattr(bridge, "_run", fake_run)
     monkeypatch.setattr(bridge, "_download_pdf", fake_download)
     monkeypatch.setattr(bridge, "_pdf_page_count", lambda path: 1)
-    monkeypatch.setattr(bridge, "_extract_pdf_text", lambda pdf, workdir: "embedded notes")
+    monkeypatch.setattr(
+        bridge, "_extract_pdf_text", lambda pdf, workdir: "embedded notes"
+    )
     monkeypatch.setattr(
         bridge,
         "_render_pdf_pages",
@@ -357,8 +418,7 @@ def test_read_drive_pdf_rejects_malformed_file_id(monkeypatch):
 def test_read_drive_spreadsheet_exports_and_returns_bounded_rows(monkeypatch):
     seen = {}
     download_url = (
-        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file"
-        "?X-Amz-Signature=x"
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
     )
 
     def fake_run(args, timeout=bridge.DEFAULT_TIMEOUT_SECONDS, sanitize_result=True):
@@ -432,19 +492,17 @@ def test_spreadsheet_job_number_filter_rejects_non_cjs_values():
 
 def test_spreadsheet_export_requires_xlsx_payload():
     with pytest.raises(bridge.BridgeRequestError, match="not an exported spreadsheet"):
-        bridge._extract_spreadsheet_export(
-            {
-                "successful": True,
-                "data": {
-                    "export_mime_type": "text/csv",
-                    "file": {
-                        "mimetype": "text/csv",
-                        "name": "sheet.csv",
-                        "s3url": "https://example.com/file",
-                    },
+        bridge._extract_spreadsheet_export({
+            "successful": True,
+            "data": {
+                "export_mime_type": "text/csv",
+                "file": {
+                    "mimetype": "text/csv",
+                    "name": "sheet.csv",
+                    "s3url": "https://example.com/file",
                 },
-            }
-        )
+            },
+        })
 
 
 def test_read_drive_spreadsheet_rejects_malformed_file_id(monkeypatch):
