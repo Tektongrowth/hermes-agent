@@ -44,6 +44,18 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
     assert "Do not stop at the first empty or partial match" in lookup
     assert "00 - Sold YYYY" in lookup
     assert "composio_read_drive_pdf" in lookup
+    for phrase in [
+        "Preserve the employee's original note verbatim",
+        "EOD - YYYY-MM-DD - <employee or crew>",
+        "An EOD note needs an Alyssa alert",
+        "A morning crew briefing",
+        "A material shortage report",
+        "A customer change request is not approved work",
+        "A completion handoff",
+        "what changed since yesterday",
+        "questions about what remains",
+    ]:
+        assert phrase in lookup
 
 
 def test_mason_config_enables_skills_for_alyssa_without_generic_toolsets() -> None:
