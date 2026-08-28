@@ -126,6 +126,18 @@ missing = allowed - discovered
 if missing:
     raise SystemExit(f"missing reviewed Mason skills: {sorted(missing)}")
 config.setdefault("skills", {})["disabled"] = sorted(discovered - allowed)
+composio_tools = (
+    config.setdefault("mcp_servers", {})
+    .setdefault("cjs-composio", {})
+    .setdefault("tools", {})
+    .setdefault("toolsets", {})
+    .setdefault("composio-approved", [])
+)
+if "composio_read_drive_text_document" not in composio_tools:
+    composio_tools.insert(
+        composio_tools.index("composio_read_drive_spreadsheet"),
+        "composio_read_drive_text_document",
+    )
 config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 PY
 chown nick:cjs-synkedup /var/lib/cjs-whiteout/hermes/config.yaml

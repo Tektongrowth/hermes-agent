@@ -47,6 +47,9 @@ MAX_SPREADSHEET_COLUMNS = 60
 MAX_SPREADSHEET_CELL_CHARS = 1_000
 MAX_SPREADSHEET_OUTPUT_CHARS = 120_000
 XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+TEXT_MIMETYPE = "text/plain"
+MAX_TEXT_DOCUMENT_BYTES = 512 * 1024
+MAX_TEXT_DOCUMENT_CHARS = 120_000
 DEFAULT_AUDIT_PATH = "/var/lib/cjs-whiteout/hermes/logs/composio-audit.jsonl"
 TOOLKIT_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 TOOL_SLUG_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,199}$")
@@ -332,6 +335,28 @@ def _extract_spreadsheet_export(result: Any) -> tuple[str, str]:
     return url, name[:200]
 
 
+def _extract_text_document_export(result: Any) -> tuple[str, str]:
+    if not isinstance(result, dict) or result.get("successful") is not True:
+        raise BridgeRequestError("Composio did not return a successful document export")
+    data = result.get("data")
+    content = data.get("file") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(content, dict):
+        raise BridgeRequestError("Composio did not return downloadable document content")
+    if (
+        content.get("mimetype") != TEXT_MIMETYPE
+        or data.get("export_mime_type") != TEXT_MIMETYPE
+    ):
+        raise BridgeRequestError("the requested Drive file is not an exported text document")
+    size = data.get("size_bytes")
+    if isinstance(size, int) and (size < 1 or size > MAX_TEXT_DOCUMENT_BYTES):
+        raise BridgeRequestError("the document is outside Mason's safe size limit")
+    url = content.get("s3url")
+    if not isinstance(url, str) or not url:
+        raise BridgeRequestError("Composio did not return a document download URL")
+    name = content.get("name") or "Drive document.txt"
+    return url, str(name)[:200]
+
+
 def _validate_composio_file_url(url: str) -> str:
     try:
         parsed = urllib.parse.urlsplit(url)
@@ -466,6 +491,41 @@ def _download_spreadsheet(url: str, destination: Path) -> None:
         )
     destination.write_bytes(payload)
     os.chmod(destination, 0o600)
+
+
+def _download_text_document(url: str) -> str:
+    approved_url = _validate_composio_file_url(url)
+    request = urllib.request.Request(
+        approved_url,
+        headers={"User-Agent": "cjs-mason-document-reader/1.0", "Accept": TEXT_MIMETYPE},
+    )
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=60) as response:
+            if response.geturl() != approved_url:
+                raise BridgeRequestError(
+                    "the document download attempted an unapproved redirect"
+                )
+            content_type = response.headers.get_content_type().lower()
+            if content_type not in {TEXT_MIMETYPE, "application/octet-stream"}:
+                raise BridgeRequestError("the downloaded Drive file is not a text document")
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_TEXT_DOCUMENT_BYTES:
+                raise BridgeRequestError("the document is outside Mason's safe size limit")
+            payload = response.read(MAX_TEXT_DOCUMENT_BYTES + 1)
+    except BridgeRequestError:
+        raise
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise BridgeRequestError("the document download returned invalid text") from exc
+    except Exception as exc:
+        raise BridgeRequestError("the document download failed") from exc
+    if not payload or len(payload) > MAX_TEXT_DOCUMENT_BYTES or b"\x00" in payload:
+        raise BridgeRequestError("the document is outside Mason's safe text limits")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BridgeRequestError("the document is not valid UTF-8 text") from exc
+    return text[:MAX_TEXT_DOCUMENT_CHARS]
 
 
 def _spreadsheet_cell(value: Any) -> Any:
@@ -949,6 +1009,55 @@ def composio_read_drive_pdf(file_id: str) -> list[TextContent | ImageContent]:
             "error",
             started,
             remote_tool="GOOGLEDRIVE_DOWNLOAD_FILE",
+        )
+        raise
+
+
+@mcp.tool()
+def composio_read_drive_text_document(file_id: str) -> dict[str, Any]:
+    """Export and read one native Google Doc from the pinned CJS Drive account.
+
+    Use this to verify a Google Doc after creating or updating it. The returned
+    text is bounded and treated as untrusted business data. This reader never
+    edits the source document.
+    """
+    started = time.monotonic()
+    clean_file_id = _validate_drive_file_id(file_id)
+    try:
+        result = _run(
+            [
+                "execute",
+                "GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE",
+                "--account",
+                _account_selector(),
+                "--data",
+                _bounded_arguments(
+                    {"fileId": clean_file_id, "mimeType": TEXT_MIMETYPE}
+                ),
+            ],
+            timeout=180,
+            sanitize_result=False,
+        )
+        url, name = _extract_text_document_export(result)
+        text = _download_text_document(url)
+        payload = {
+            "name": name,
+            "text": text,
+            "truncated": len(text) >= MAX_TEXT_DOCUMENT_CHARS,
+        }
+        _audit(
+            "composio_read_drive_text_document",
+            "ok",
+            started,
+            remote_tool="GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE",
+        )
+        return payload
+    except Exception:
+        _audit(
+            "composio_read_drive_text_document",
+            "error",
+            started,
+            remote_tool="GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE",
         )
         raise
 

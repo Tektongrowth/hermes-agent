@@ -415,6 +415,56 @@ def test_read_drive_pdf_rejects_malformed_file_id(monkeypatch):
         bridge.composio_read_drive_pdf("../bad")
 
 
+def test_read_drive_text_document_exports_and_reads_content(monkeypatch):
+    seen = {}
+    download_url = (
+        "https://temp.0123456789abcdef.r2.cloudflarestorage.com/file?X-Amz-Signature=x"
+    )
+
+    def fake_run(args, timeout=bridge.DEFAULT_TIMEOUT_SECONDS, sanitize_result=True):
+        seen["args"] = args
+        seen["timeout"] = timeout
+        seen["sanitize_result"] = sanitize_result
+        return {
+            "successful": True,
+            "data": {
+                "export_mime_type": bridge.TEXT_MIMETYPE,
+                "file": {
+                    "mimetype": bridge.TEXT_MIMETYPE,
+                    "name": "Project Notes.txt",
+                    "s3url": download_url,
+                },
+                "size_bytes": 100,
+            },
+        }
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    monkeypatch.setattr(
+        bridge,
+        "_download_text_document",
+        lambda url: "Materials\nAdam\nRylee\nAwaiting Measurement",
+    )
+
+    result = bridge.composio_read_drive_text_document("file_abc123")
+
+    assert result == {
+        "name": "Project Notes.txt",
+        "text": "Materials\nAdam\nRylee\nAwaiting Measurement",
+        "truncated": False,
+    }
+    assert seen["args"][:3] == [
+        "execute",
+        "GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE",
+        "--account",
+    ]
+    assert json.loads(seen["args"][-1]) == {
+        "fileId": "file_abc123",
+        "mimeType": "text/plain",
+    }
+    assert seen["timeout"] == 180
+    assert seen["sanitize_result"] is False
+
+
 def test_read_drive_spreadsheet_exports_and_returns_bounded_rows(monkeypatch):
     seen = {}
     download_url = (
@@ -521,7 +571,9 @@ def test_pdf_reader_is_wired_into_mason_config_and_instructions():
     )
     soul = (DEPLOYMENT_ROOT / "SOUL.md").read_text(encoding="utf-8")
     assert config.count("- composio_read_drive_pdf") == 1
+    assert config.count("- composio_read_drive_text_document") == 1
     assert config.count("- composio_read_drive_spreadsheet") == 1
     assert "Use `composio_read_drive_pdf`" in soul
     assert "call `vision_analyze` on every page" in soul
+    assert "Use `composio_read_drive_text_document`" in soul
     assert "Use `composio_read_drive_spreadsheet`" in soul

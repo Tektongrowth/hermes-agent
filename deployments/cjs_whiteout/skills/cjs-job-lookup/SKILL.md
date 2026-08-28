@@ -20,6 +20,7 @@ Use this skill only inside the CJS Landscape and Whiteout Winter Services tenant
    - Inspect every plausible customer-folder match and trace its parent path. Prefer a match under `00 - Sold YYYY` over an empty exact-name folder elsewhere.
    - Do not stop at the first empty or partial match. Exhaust plausible CJS year and sold-folder matches, then list the chosen folder's children without a filename filter.
    - When a plan PDF is found, call `composio_read_drive_pdf` and analyze every rendered page needed to extract notes and dimensions.
+   - After creating a project-notes Google Doc, call `composio_read_drive_text_document` on the created document ID and verify the requested sections from the returned text before reporting success.
 4. Use only the CJS Outlook connection for CJS correspondence.
 5. Match records by verified job number or exact customer/property identity.
 6. Combine only verified fields and name any unresolved mismatch.
