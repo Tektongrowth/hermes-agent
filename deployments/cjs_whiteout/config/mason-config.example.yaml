@@ -8,7 +8,7 @@ _config_version: 8
 model:
   provider: openrouter
   default: google/gemini-2.5-pro
-timezone: America/New_York
+timezone: America/Chicago
 group_sessions_per_user: true
 memory:
   provider: none
