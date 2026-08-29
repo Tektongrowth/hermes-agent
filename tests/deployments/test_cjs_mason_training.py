@@ -108,6 +108,8 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "Check later replies",
         "Owner not specified",
         "do not send email, change mailbox state, create tasks",
+        "A platform label such as `Action required`",
+        "Never add who would typically handle it",
     ]:
         assert phrase in briefing
 
