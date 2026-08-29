@@ -17,6 +17,10 @@ EXPECTED_SKILLS = {
     "job-cost-project-review",
     "schedule-crew-planning",
     "hit-lists-reminders",
+    "procurement-invoice-review",
+    "project-changes-closeout",
+    "snow-material-contract-operations",
+    "workforce-directory-rewards",
 }
 
 
@@ -61,6 +65,51 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "do not infer unfinished scope",
     ]:
         assert phrase in lookup
+
+    procurement = (skills_root / "procurement-invoice-review" / "SKILL.md").read_text()
+    for phrase in [
+        "verify the source says it is sold",
+        "Never silently allocate an invoice",
+        "Do not create folders",
+        "Never send or place an order without exact approval",
+    ]:
+        assert phrase in procurement
+
+    changes = (skills_root / "project-changes-closeout" / "SKILL.md").read_text()
+    for phrase in [
+        "Pending review",
+        "Preserve prior contract and design versions",
+        "final sold scope plus approved change orders",
+        "check every change ID",
+    ]:
+        assert phrase in changes
+
+    snow = (skills_root / "snow-material-contract-operations" / "SKILL.md").read_text()
+    for phrase in [
+        "Chat history is not inventory",
+        "Do not mix salt weight, liquid volume, and chemical quantity",
+        "signed contract version",
+        "Do not generate, change, approve, or send an invoice",
+    ]:
+        assert phrase in snow
+
+    workforce = (skills_root / "workforce-directory-rewards" / "SKILL.md").read_text()
+    for phrase in [
+        "Never infer or rank by protected traits",
+        "Do not make an automatic hiring or rejection decision",
+        "Eligible for review",
+        "Match against existing leads",
+    ]:
+        assert phrase in workforce
+
+    briefing = (skills_root / "daily-operations-briefing" / "SKILL.md").read_text()
+    for phrase in [
+        "Read each candidate message body",
+        "Check later replies",
+        "Owner not specified",
+        "do not send email, change mailbox state, create tasks",
+    ]:
+        assert phrase in briefing
 
 
 def test_mason_config_enables_skills_for_alyssa_without_generic_toolsets() -> None:

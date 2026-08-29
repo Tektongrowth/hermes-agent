@@ -118,6 +118,10 @@ allowed = {
     "job-cost-project-review",
     "schedule-crew-planning",
     "hit-lists-reminders",
+    "procurement-invoice-review",
+    "project-changes-closeout",
+    "snow-material-contract-operations",
+    "workforce-directory-rewards",
 }
 config_path = Path("/var/lib/cjs-whiteout/hermes/config.yaml")
 config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
