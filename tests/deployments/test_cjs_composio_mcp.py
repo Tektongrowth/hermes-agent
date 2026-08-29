@@ -161,8 +161,10 @@ def test_query_outlook_emails_resolves_stored_result_and_bounds_summaries(monkey
 
     assert seen["argv"][2:4] == ["--account", "whiteout_test-account"]
     arguments = json.loads(seen["argv"][5])
-    assert arguments["filter"] == "contains(subject, 'invoice')"
+    assert "receivedDateTime ge " in arguments["filter"]
+    assert "contains(subject, 'invoice')" in arguments["filter"]
     assert arguments["top"] == 10
+    assert result["received_after"].endswith("Z")
     assert result["returned"] == 1
     assert len(result["messages"][0]["bodyPreview"]) == 500
 

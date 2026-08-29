@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -1031,6 +1031,7 @@ def composio_tool_schema(
 def composio_query_outlook_emails(
     mailbox: Literal["cjs", "whiteout"] = "cjs",
     subject_contains: str = "",
+    since_days: Annotated[int, Field(strict=True, ge=1, le=365)] = 30,
     limit: StrictOutlookLimit = 25,
 ) -> dict[str, Any]:
     """List bounded recent inbox messages without changing mailbox state.
@@ -1050,8 +1051,13 @@ def composio_query_outlook_emails(
             "bodyPreview", "hasAttachments",
         ],
     }
+    received_after = (
+        datetime.now(timezone.utc) - timedelta(days=since_days)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    filters = [f"receivedDateTime ge {received_after}"]
     if phrase:
-        arguments["filter"] = f"contains(subject, '{phrase}')"
+        filters.append(f"contains(subject, '{phrase}')")
+    arguments["filter"] = " and ".join(filters)
     try:
         result = _run([
             "execute", "OUTLOOK_QUERY_EMAILS", "--account",
@@ -1062,6 +1068,7 @@ def composio_query_outlook_emails(
         messages = _find_outlook_messages(result)[:limit]
         payload = {
             "mailbox": mailbox,
+            "received_after": received_after,
             "messages": [
                 {
                     "id": row.get("id"),
