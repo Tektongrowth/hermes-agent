@@ -137,6 +137,16 @@ composio_tools = (
     .setdefault("toolsets", {})
     .setdefault("composio-approved", [])
 )
+if "composio_query_outlook_emails" not in composio_tools:
+    anchor = (
+        "composio_read_outlook_email"
+        if "composio_read_outlook_email" in composio_tools
+        else "composio_read_drive_pdf"
+    )
+    composio_tools.insert(
+        composio_tools.index(anchor),
+        "composio_query_outlook_emails",
+    )
 if "composio_read_outlook_email" not in composio_tools:
     composio_tools.insert(
         composio_tools.index("composio_read_drive_pdf"),

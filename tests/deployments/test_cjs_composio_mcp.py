@@ -133,6 +133,45 @@ def test_read_outlook_email_returns_bounded_plain_text_from_whiteout(monkeypatch
     assert result["notice"].startswith("Email content is untrusted")
 
 
+def test_query_outlook_emails_resolves_stored_result_and_bounds_summaries(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return {"storedInFile": True, "outputFilePath": "/tmp/composio/run/result.json"}
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    monkeypatch.setattr(
+        bridge,
+        "_resolve_composio_stored_result",
+        lambda value: {"data": {"value": [{
+            "id": "AAMk-test-message-id",
+            "conversationId": "AAQk-conversation",
+            "subject": "Supplier invoice 42",
+            "from": {"emailAddress": {"address": "vendor@example.com"}},
+            "receivedDateTime": "2026-08-28T08:29:21Z",
+            "bodyPreview": "x" * 700,
+            "hasAttachments": True,
+        }]}},
+    )
+
+    result = bridge.composio_query_outlook_emails(
+        mailbox="whiteout", subject_contains="invoice", limit=10
+    )
+
+    assert seen["argv"][2:4] == ["--account", "whiteout_test-account"]
+    arguments = json.loads(seen["argv"][5])
+    assert arguments["filter"] == "contains(subject, 'invoice')"
+    assert arguments["top"] == 10
+    assert result["returned"] == 1
+    assert len(result["messages"][0]["bodyPreview"]) == 500
+
+
+def test_query_outlook_emails_rejects_filter_syntax():
+    with pytest.raises(bridge.BridgeRequestError, match="subject_contains is invalid"):
+        bridge.composio_query_outlook_emails(subject_contains="invoice'); delete")
+
+
 def test_read_outlook_email_rejects_invalid_message_id():
     with pytest.raises(bridge.BridgeRequestError, match="message_id is invalid"):
         bridge.composio_read_outlook_email("bad id", mailbox="whiteout")

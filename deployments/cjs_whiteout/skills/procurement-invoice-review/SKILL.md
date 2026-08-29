@@ -23,7 +23,7 @@ Use only inside the CJS Landscape and Whiteout tenant. A skill never grants acce
 
 ## Emailed invoice review
 
-1. Search the approved Outlook mailbox read-only. Read the full message body and inspect invoice attachments through approved read tools.
+1. Search the approved Outlook mailbox read-only with `composio_query_outlook_emails`, using `subject_contains: invoice` when appropriate. Never invent an Outlook search slug or try to read a server-side saved-result path. Read each candidate with `composio_read_outlook_email`, then inspect invoice attachments through approved read tools.
 2. Extract only visible evidence: vendor, invoice number, invoice date, amount, PO or job reference, customer, address, and line-item summary.
 3. Check duplicates by vendor, invoice number, amount, source message, and attachment identity when those fields are available.
 4. Search SynkedUP and Drive for exact job numbers, customer names, property addresses, and verified project folders.

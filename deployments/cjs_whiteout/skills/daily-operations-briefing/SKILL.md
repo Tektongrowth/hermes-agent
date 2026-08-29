@@ -22,7 +22,7 @@ Use this skill only inside the CJS Landscape and Whiteout Winter Services tenant
 
 ## Daily Outlook hit list
 
-1. Search both approved Outlook mailboxes for the requested business day and keep CJS Landscape and Whiteout in separate sections.
+1. Call `composio_query_outlook_emails` separately for both approved Outlook mailboxes and keep CJS Landscape and Whiteout in separate sections. Never invent an Outlook tool slug and never try to read a server-side saved-result path.
 2. Read each candidate message body with `composio_read_outlook_email`. A subject line or snippet alone does not prove urgency, ownership, or an open action.
 3. Identify explicit requests, deadlines, blockers, customer changes, vendor issues, invoice reviews, and unresolved commitments. Put an item under `Urgent` only when the body proves a deadline, active delay, safety or damage issue, customer problem requiring timely response, or immediate operational impact. A platform label such as `Action required`, a new application, or a normal request is not urgent by itself.
 4. Check later replies in the same thread before calling an item open. A draft, missing message, or silence does not prove resolution. If thread or reply verification is unavailable, label the open status `Reply verification unavailable`; do not present the item as confirmed open.
