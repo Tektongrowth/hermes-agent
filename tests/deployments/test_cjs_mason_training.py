@@ -54,6 +54,11 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "A completion handoff",
         "what changed since yesterday",
         "questions about what remains",
+        "never carry a customer or project name forward",
+        "absence of a record is not proof",
+        "filenames alone are not evidence",
+        "omission from a later note does not resolve",
+        "do not infer unfinished scope",
     ]:
         assert phrase in lookup
 
