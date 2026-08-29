@@ -110,6 +110,8 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "do not send email, change mailbox state, create tasks",
         "A platform label such as `Action required`",
         "Never add who would typically handle it",
+        "Reply verification unavailable",
+        "`Addressed to Mike` and `original order was from Alyssa` do not assign ownership",
     ]:
         assert phrase in briefing
 
