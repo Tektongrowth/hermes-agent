@@ -78,6 +78,7 @@ def test_mason_gateway_can_refresh_aws_cache_and_drain_cleanly():
     assert "/home/nick/.aws/sso/cache" in gateway
     assert "/home/nick/.aws/cli/cache" in gateway
     assert "ProtectHome=read-only" in gateway
+    assert "Environment=DISCORD_ALLOW_BOTS=mentions" in gateway
 
 
 def test_login_vnc_is_loopback_only_and_never_auto_enabled():
