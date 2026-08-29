@@ -133,6 +133,11 @@ composio_tools = (
     .setdefault("toolsets", {})
     .setdefault("composio-approved", [])
 )
+if "composio_read_outlook_email" not in composio_tools:
+    composio_tools.insert(
+        composio_tools.index("composio_read_drive_pdf"),
+        "composio_read_outlook_email",
+    )
 if "composio_read_drive_text_document" not in composio_tools:
     composio_tools.insert(
         composio_tools.index("composio_read_drive_spreadsheet"),

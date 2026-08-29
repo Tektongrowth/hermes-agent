@@ -99,6 +99,7 @@ mcp_servers:
         - composio_list_connections
         - composio_search
         - composio_tool_schema
+        - composio_read_outlook_email
         - composio_read_drive_pdf
         - composio_read_drive_text_document
         - composio_read_drive_spreadsheet
