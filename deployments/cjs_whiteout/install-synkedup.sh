@@ -130,6 +130,19 @@ missing = allowed - discovered
 if missing:
     raise SystemExit(f"missing reviewed Mason skills: {sorted(missing)}")
 config.setdefault("skills", {})["disabled"] = sorted(discovered - allowed)
+synkedup_tools = (
+    config.setdefault("mcp_servers", {})
+    .setdefault("cjs-synkedup", {})
+    .setdefault("tools", {})
+    .setdefault("toolsets", {})
+    .setdefault("synkedup-operations-read", [])
+)
+if "synkedup_sold_jobs" not in synkedup_tools:
+    anchor = "synkedup_job_briefs" if "synkedup_job_briefs" in synkedup_tools else None
+    if anchor:
+        synkedup_tools.insert(synkedup_tools.index(anchor), "synkedup_sold_jobs")
+    else:
+        synkedup_tools.append("synkedup_sold_jobs")
 composio_tools = (
     config.setdefault("mcp_servers", {})
     .setdefault("cjs-composio", {})
