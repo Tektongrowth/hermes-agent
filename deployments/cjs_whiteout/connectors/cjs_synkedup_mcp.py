@@ -133,6 +133,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_sales_pipeline", "sales", "/sales", "Read the sales pipeline dashboard.", "sales"),
     ToolSpec("synkedup_pricing_catalog", "sales", "/settings/pricing", "Read sales pricing without internal cost or margin fields.", "sales", "/settings/pricing/{record_id}"),
     ToolSpec("synkedup_jobs", "operations", "/jobs", "Search all jobs, including unscheduled, sold, active, completed, and archived jobs.", "operations", "/jobs/{record_id}"),
+    ToolSpec("synkedup_sold_jobs", "operations", "/dashboard", "List jobs in the live SynkedUP SOLD JOB REVENUE panel for the current dashboard date range. Use this tool instead of text-searching synkedup_jobs for sold status.", "operations"),
     ToolSpec("synkedup_job_briefs", "operations", "/jobs", "Read job briefs and scope details across every job state.", "operations", "/jobs/{record_id}/brief"),
     ToolSpec("synkedup_maintenance", "operations", "/maintenance", "Read maintenance work in every state.", "operations", "/maintenance/{record_id}"),
     ToolSpec("synkedup_service_tickets", "operations", "/service-tickets", "Read service tickets in every state.", "operations", "/service-tickets/{record_id}"),
@@ -247,6 +248,25 @@ DASHBOARD_LABOR_JOBS_SCRIPT = r"""
     date_end: dates[1] || '',
     jobs
   };
+})()
+""".strip()
+SOLD_JOBS_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const dates = Array.from(document.querySelectorAll('.main-dashboard input[date-range]')).map((input) => clean(input.value));
+  const candidates = Array.from(document.querySelectorAll('.main-dashboard .ant-space'));
+  const section = candidates.find((el) => clean(el.innerText || el.textContent).startsWith('SOLD JOB REVENUE'));
+  if (!section) return {ready: false, date_start: dates[0] || '', date_end: dates[1] || '', jobs: []};
+  const header = Array.from(section.querySelectorAll('.ant-collapse-header')).find((el) => /jobs included in this data/i.test(clean(el.innerText || el.textContent)));
+  if (header && header.getAttribute('aria-expanded') !== 'true') header.click();
+  const table = section.querySelector('table');
+  const headers = table ? Array.from(table.querySelectorAll('thead th')).map((el) => clean(el.innerText || el.textContent)) : [];
+  const rows = table ? Array.from(table.querySelectorAll('tbody tr')).map((row) => {
+    const cells = Array.from(row.querySelectorAll('th,td')).map((el) => clean(el.innerText || el.textContent));
+    const link = row.querySelector('a[href*="#!/projects/"]');
+    return {cells, href: link ? link.href : ''};
+  }).filter((row) => row.cells.length && row.href) : [];
+  return {ready: Boolean(rows.length), date_start: dates[0] || '', date_end: dates[1] || '', headers, rows};
 })()
 """.strip()
 PROJECT_LABOR_SUMMARY_SCRIPT = r"""
@@ -506,6 +526,7 @@ class CDPClient:
         if expression not in {
             EXTRACT_PAGE_SCRIPT,
             DASHBOARD_LABOR_JOBS_SCRIPT,
+            SOLD_JOBS_SCRIPT,
             PROJECT_LABOR_SUMMARY_SCRIPT,
             READY_STATE_SCRIPT,
             LOCATION_SCRIPT,
@@ -763,6 +784,47 @@ class SynkedUPBrowser:
             raise ReauthenticationRequired("authenticated SynkedUP session is required")
         _validate_result_origin(str(page.get("url", "")), self.origin)
         return page
+
+    def sold_jobs(self) -> dict[str, Any]:
+        """Read the server-owned sold-job dashboard panel without exposed navigation."""
+        controller = CDPClient()
+        try:
+            controller.connect(self.host)
+            page = controller.navigate(f"{self.base_url}/dashboard", self.origin)
+            if _looks_logged_out(page):
+                raise ReauthenticationRequired("authenticated SynkedUP session is required")
+            result = _wait_for_constant(
+                controller,
+                SOLD_JOBS_SCRIPT,
+                lambda value: isinstance(value, dict) and bool(value.get("ready")),
+            )
+            if not isinstance(result, dict) or not result.get("ready"):
+                raise RuntimeError("sold-job dashboard panel did not load")
+            rows: list[list[str]] = []
+            for item in result.get("rows", [])[:MAX_RESULT_ROWS]:
+                href = str(item.get("href", ""))
+                _validate_dashboard_project_url(href, self.origin)
+                cells = [str(value)[:1000] for value in item.get("cells", [])]
+                rows.append(cells + [href])
+            return {
+                "url": f"{self.base_url}/dashboard",
+                "title": "Sold jobs",
+                "headings": ["SOLD JOB REVENUE"],
+                "alerts": [],
+                "tables": [{
+                    "headers": [str(value)[:200] for value in result.get("headers", [])] + ["Verified project URL"],
+                    "rows": rows,
+                }],
+                "fields": [
+                    {"label": "Dashboard date start", "value": str(result.get("date_start", ""))},
+                    {"label": "Dashboard date end", "value": str(result.get("date_end", ""))},
+                    {"label": "Status source", "value": "SynkedUP SOLD JOB REVENUE panel"},
+                ],
+                "cards": [],
+                "links": [],
+            }
+        finally:
+            controller.close()
 
     def labor_variance(self, *, include_financial: bool = False) -> dict[str, Any]:
         cached = _load_full_scan_cache(
@@ -1293,7 +1355,9 @@ def _execute_read(
         _RATE_LIMITER.acquire()
         with _EXECUTION_LOCK:
             browser = SynkedUPBrowser()
-            if spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
+            if spec.name == "synkedup_sold_jobs":
+                raw = browser.sold_jobs()
+            elif spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
                 raw = browser.labor_variance(include_financial=spec.name == "synkedup_job_costing")
                 if record_id:
                     for table in raw.get("tables", []):
