@@ -844,6 +844,22 @@ def _validate_outlook_message_id(message_id: str) -> str:
     return clean
 
 
+def _resolve_composio_stored_result(value: Any) -> Any:
+    if not isinstance(value, dict) or not value.get("storedInFile"):
+        return value
+    raw_path = str(value.get("outputFilePath") or "").strip()
+    path = Path(raw_path).resolve()
+    allowed_root = Path("/tmp/composio").resolve()
+    if allowed_root not in path.parents or not path.is_file():
+        raise BridgeRequestError("Composio stored output path is invalid")
+    if path.stat().st_size > 1024 * 1024:
+        raise BridgeRequestError("Composio stored output is too large")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BridgeRequestError("Composio stored output is unreadable") from exc
+
+
 def _find_outlook_message(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         if "body" in value and any(
@@ -1019,6 +1035,7 @@ def composio_read_outlook_email(
                 ],
             }),
         ])
+        result = _resolve_composio_stored_result(result)
         message = _find_outlook_message(result)
         if message is None:
             raise BridgeRequestError(

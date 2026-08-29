@@ -138,6 +138,25 @@ def test_read_outlook_email_rejects_invalid_message_id():
         bridge.composio_read_outlook_email("bad id", mailbox="whiteout")
 
 
+def test_resolve_composio_stored_outlook_result(monkeypatch, tmp_path):
+    root = tmp_path / "composio"
+    path = root / "run" / "result.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"data": {"id": "AAMk-id", "body": {"content": "ok"}}}))
+    monkeypatch.setattr(
+        bridge.Path,
+        "resolve",
+        lambda self: root if str(self) == "/tmp/composio" else self.absolute(),
+    )
+
+    result = bridge._resolve_composio_stored_result({
+        "storedInFile": True,
+        "outputFilePath": str(path),
+    })
+
+    assert result["data"]["body"]["content"] == "ok"
+
+
 def test_connection_registry_is_discoverable_without_exposing_account_selectors():
     result = bridge.composio_list_connections()
 
