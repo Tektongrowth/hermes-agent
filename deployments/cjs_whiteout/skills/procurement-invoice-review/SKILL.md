@@ -14,12 +14,14 @@ Use only inside the CJS Landscape and Whiteout tenant. A skill never grants acce
 ## Sold-job plant and material requests
 
 1. Enumerate the live SynkedUP `SOLD JOB REVENUE` panel with `synkedup_sold_jobs`. Do not search for literal strings such as `status:sold`, `status:won`, or `status:approved`; the generic job search treats those as text and can return a false empty result. Treat panel membership as the live sold-status source. When a project detail exposes a Status field, verify the source says it is sold there too. Active, scheduled, proposed, or discussed is not sold unless the live record explicitly proves it.
-2. For each listed sold job, call `synkedup_sold_job_materials` with the exact job number. Use its work-area item names, estimated quantities, and source units. Exclude rows explicitly identified as labor from a vendor material draft. Keep fees and other uncertain non-material rows separate instead of silently treating them as orderable materials.
-3. For plants, preserve source name, cultivar or species, size, quantity, work area, and delivery timing. For materials, preserve item, quantity, source unit, work area, and timing.
-4. Never convert units, combine uncertain variants, choose substitutions, assign a vendor, or change estimated quantity into order quantity without an approved business rule or live source.
-5. Group by nursery or vendor only when the mapping is verified. Put unassigned lines under `Vendor not verified`.
-6. Reconcile every output line to a source line before drafting.
-7. Draft only. Show mailbox or sender, To/CC, subject, full body, attachments, job references, missing fields, and the consequence. Never send or place an order without exact approval.
+2. For each listed sold job, call `synkedup_sold_job_materials` with the exact job number and `page_size: 100`. Inspect `pagination.total_rows`, `pagination.has_more`, and `pagination.next_cursor`. Continue with the returned cursor until every row is retrieved. A job is complete only when `has_more` is false. Never treat the first page as the full job.
+3. Build a source ledger before drafting. Give every retrieved row a stable sequence and preserve its job number, job name, work area, item name, estimated quantity, and full source unit exactly as returned. Classify each row as `material`, `explicit labor`, or `fee/uncertain`. Do not merge duplicate-looking rows across work areas and do not add quantities together. Reconcile the retrieved-row count to the classified-row count before drafting.
+4. Exclude `explicit labor` rows from the vendor draft. Put every `fee/uncertain` row in a separate review section. If a source unit is blank, shortened, or contains an ellipsis, identify that exact row as unresolved instead of completing or guessing the unit.
+5. For plants, preserve source name, cultivar or species, size, estimated quantity, source unit, work area, and delivery timing. For materials, preserve item, estimated quantity, source unit, work area, and timing.
+6. Never convert units, combine uncertain variants, choose substitutions, assign a vendor, or change estimated quantity into order quantity without an approved business rule or live source.
+7. Group by nursery or vendor only when the mapping is verified. Put unassigned lines under `Vendor not verified`.
+8. Reconcile every output line to one source-ledger row before drafting. State the counts: retrieved, material, explicit labor excluded, fee/uncertain, and unresolved. These counts must reconcile.
+9. Draft only. Show mailbox or sender, To/CC, subject, full body, attachments, job references, missing fields, and the consequence. Never invent a recipient, sender, vendor, mailbox, delivery date, attachment, or placeholder address. If the recipient or sender is not verified, write `To: Not verified` or `From: Not verified` and keep the draft unsent. Never send or place an order without exact approval.
 
 ## Emailed invoice review
 

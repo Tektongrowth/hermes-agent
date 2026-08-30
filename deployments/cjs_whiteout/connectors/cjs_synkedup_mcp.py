@@ -39,6 +39,7 @@ FULL_SCAN_CACHE_MAX_AGE_SECONDS = 21_600
 MAX_QUERY_LENGTH = 100
 MAX_RECORD_ID_LENGTH = 80
 MAX_RESULT_ROWS = 100
+MAX_SOLD_MATERIAL_ROWS = 500
 MAX_RESPONSE_CHARS = 120_000
 MAX_REQUESTS_PER_MINUTE = 30
 MIN_REQUEST_INTERVAL_SECONDS = 0.20
@@ -322,7 +323,9 @@ WORKAREA_ITEMS_SCRIPT = r"""
     const item = clean(cells[1] && cells[1].innerText);
     const quantityCell = cells[3];
     const quantity = clean(quantityCell && quantityCell.querySelector('input') && quantityCell.querySelector('input').value);
-    const unit = clean(quantityCell && quantityCell.innerText);
+    // textContent preserves the full source unit when the rendered UI applies
+    // CSS ellipsis (for example, "Linear Feet" rendered as "Linear …").
+    const unit = clean(quantityCell && quantityCell.textContent);
     return {item, quantity, unit};
   }).filter((row) => row.item && row.quantity && row.unit);
   // A visible work-area table with zero material rows is a complete empty result,
@@ -975,7 +978,7 @@ class SynkedUPBrowser:
             "title": f"Sold job materials {job_number}",
             "headings": [job_number, str(match[1])[:500]],
             "alerts": ["Quantities are estimated source quantities. Do not convert them or treat them as order quantities without an approved rule."],
-            "tables": [{"headers": ["Work area", "Item", "Estimated quantity", "Source unit"], "rows": rows[:MAX_RESULT_ROWS]}],
+            "tables": [{"headers": ["Work area", "Item", "Estimated quantity", "Source unit"], "rows": rows[:MAX_SOLD_MATERIAL_ROWS]}],
             "fields": [
                 {"label": "Sold status source", "value": "SynkedUP SOLD JOB REVENUE panel and project detail"},
                 {"label": "Project URL", "value": href},
@@ -1453,14 +1456,24 @@ def _local_filter(
             return False
         return True
 
+    total_rows = 0
+    has_more = False
     for table in payload.get("tables", []):
         rows = [row for row in table.get("rows", []) if matches(" ".join(row))]
+        total_rows += len(rows)
+        has_more = has_more or len(rows) > cursor + page_size
         table["rows"] = rows[cursor : cursor + page_size]
     cards = [card for card in payload.get("cards", []) if matches(card)]
     payload["cards"] = cards[cursor : cursor + page_size]
     fields = [field for field in payload.get("fields", []) if matches(field)]
     payload["fields"] = fields[cursor : cursor + page_size]
-    payload["pagination"] = {"cursor": cursor, "page_size": page_size}
+    payload["pagination"] = {
+        "cursor": cursor,
+        "page_size": page_size,
+        "total_rows": total_rows,
+        "has_more": has_more,
+        "next_cursor": cursor + page_size if has_more else None,
+    }
     return payload
 
 

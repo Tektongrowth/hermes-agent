@@ -350,6 +350,38 @@ def test_local_filters_apply_query_dates_and_cursor():
         cursor=1,
     )
     assert result["tables"][0]["rows"] == [["MS-003 Beta", "2026-03-01"]]
+    assert result["pagination"] == {
+        "cursor": 1,
+        "page_size": 1,
+        "total_rows": 2,
+        "has_more": False,
+        "next_cursor": None,
+    }
+
+
+def test_local_filter_reports_more_rows_and_next_cursor():
+    payload = {
+        "tables": [{"headers": ["Item"], "rows": [["A"], ["B"], ["C"]]}],
+        "cards": [],
+        "fields": [],
+    }
+    result = synkedup._local_filter(
+        payload,
+        query="",
+        start_date="",
+        end_date="",
+        page_size=2,
+        cursor=0,
+    )
+    assert result["tables"][0]["rows"] == [["A"], ["B"]]
+    assert result["pagination"]["total_rows"] == 3
+    assert result["pagination"]["has_more"] is True
+    assert result["pagination"]["next_cursor"] == 2
+
+
+def test_workarea_unit_extraction_uses_full_dom_text():
+    assert "quantityCell.textContent" in synkedup.WORKAREA_ITEMS_SCRIPT
+    assert "quantityCell.innerText" not in synkedup.WORKAREA_ITEMS_SCRIPT
 
 
 def test_dashboard_project_links_are_same_origin_bounded_hash_routes():
