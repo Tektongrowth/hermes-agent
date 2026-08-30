@@ -143,6 +143,12 @@ if "synkedup_sold_jobs" not in synkedup_tools:
         synkedup_tools.insert(synkedup_tools.index(anchor), "synkedup_sold_jobs")
     else:
         synkedup_tools.append("synkedup_sold_jobs")
+if "synkedup_sold_job_materials" not in synkedup_tools:
+    anchor = "synkedup_job_briefs" if "synkedup_job_briefs" in synkedup_tools else None
+    if anchor:
+        synkedup_tools.insert(synkedup_tools.index(anchor), "synkedup_sold_job_materials")
+    else:
+        synkedup_tools.append("synkedup_sold_job_materials")
 composio_tools = (
     config.setdefault("mcp_servers", {})
     .setdefault("cjs-composio", {})

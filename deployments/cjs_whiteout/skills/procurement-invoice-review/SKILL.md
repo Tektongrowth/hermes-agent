@@ -14,7 +14,7 @@ Use only inside the CJS Landscape and Whiteout tenant. A skill never grants acce
 ## Sold-job plant and material requests
 
 1. Enumerate the live SynkedUP `SOLD JOB REVENUE` panel with `synkedup_sold_jobs`. Do not search for literal strings such as `status:sold`, `status:won`, or `status:approved`; the generic job search treats those as text and can return a false empty result. Treat panel membership as the live sold-status source. When a project detail exposes a Status field, verify the source says it is sold there too. Active, scheduled, proposed, or discussed is not sold unless the live record explicitly proves it.
-2. Read the approved estimate, proposal, work areas, items, materials, and approved change orders needed for the request.
+2. For each listed sold job, call `synkedup_sold_job_materials` with the exact job number. Use its work-area item names, estimated quantities, and source units. Exclude rows explicitly identified as labor from a vendor material draft. Keep fees and other uncertain non-material rows separate instead of silently treating them as orderable materials.
 3. For plants, preserve source name, cultivar or species, size, quantity, work area, and delivery timing. For materials, preserve item, quantity, source unit, work area, and timing.
 4. Never convert units, combine uncertain variants, choose substitutions, assign a vendor, or change estimated quantity into order quantity without an approved business rule or live source.
 5. Group by nursery or vendor only when the mapping is verified. Put unassigned lines under `Vendor not verified`.

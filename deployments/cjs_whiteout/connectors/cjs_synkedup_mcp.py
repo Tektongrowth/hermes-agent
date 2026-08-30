@@ -134,6 +134,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec("synkedup_pricing_catalog", "sales", "/settings/pricing", "Read sales pricing without internal cost or margin fields.", "sales", "/settings/pricing/{record_id}"),
     ToolSpec("synkedup_jobs", "operations", "/jobs", "Search all jobs, including unscheduled, sold, active, completed, and archived jobs.", "operations", "/jobs/{record_id}"),
     ToolSpec("synkedup_sold_jobs", "operations", "/dashboard", "List jobs in the live SynkedUP SOLD JOB REVENUE panel for the current dashboard date range. Use this tool instead of text-searching synkedup_jobs for sold status.", "operations"),
+    ToolSpec("synkedup_sold_job_materials", "operations", "/dashboard", "Read estimated item names, quantities, and source units from approved work areas on one verified sold job. Pass the exact sold job number in query, for example AY-863.", "operations"),
     ToolSpec("synkedup_job_briefs", "operations", "/jobs", "Read job briefs and scope details across every job state.", "operations", "/jobs/{record_id}/brief"),
     ToolSpec("synkedup_maintenance", "operations", "/maintenance", "Read maintenance work in every state.", "operations", "/maintenance/{record_id}"),
     ToolSpec("synkedup_service_tickets", "operations", "/service-tickets", "Read service tickets in every state.", "operations", "/service-tickets/{record_id}"),
@@ -267,6 +268,76 @@ SOLD_JOBS_SCRIPT = r"""
     return {cells, href: link ? link.href : ''};
   }).filter((row) => row.cells.length && row.href) : [];
   return {ready: Boolean(rows.length), date_start: dates[0] || '', date_end: dates[1] || '', headers, rows};
+})()
+""".strip()
+PROJECT_PLAN_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const tab = document.querySelector('[data-target="#tab-job-plan"]');
+  const body = clean(document.body && document.body.innerText);
+  if (tab) tab.click();
+  return {ready: Boolean(tab && document.querySelector('#tab-job-plan')), sold: body.includes('This project has been sold')};
+})()
+""".strip()
+WORKAREA_CARDS_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const root = document.querySelector('#tab-job-plan');
+  if (!root) return [];
+  return Array.from(root.querySelectorAll('div[style*="border: 1px solid"]')).map((card) => {
+    const name = clean(card.querySelector('strong') && card.querySelector('strong').innerText);
+    const clickable = Array.from(card.querySelectorAll('div')).find((el) => getComputedStyle(el).cursor === 'pointer' && clean(el.innerText).includes(name));
+    const rect = (clickable || card).getBoundingClientRect();
+    return {name, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  }).filter((item) => item.name && item.x > 0 && item.y > 0);
+})()
+""".strip()
+NEXT_WORKAREA_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const root = document.querySelector('#tab-job-plan');
+  if (!root) return '';
+  const cards = Array.from(root.querySelectorAll('div[style*="border: 1px solid"]'));
+  const card = cards.find((el) => !el.hasAttribute('data-mason-read') && el.querySelector('strong'));
+  if (!card) return '';
+  card.setAttribute('data-mason-read', '1');
+  const name = clean(card.querySelector('strong').innerText);
+  const clickable = Array.from(card.querySelectorAll('div')).find((el) => getComputedStyle(el).cursor === 'pointer' && clean(el.innerText).includes(name));
+  (clickable || card.querySelector('strong') || card).click();
+  return name;
+})()
+""".strip()
+WORKAREA_ITEMS_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter((el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && el.querySelector('table');
+  });
+  const dialog = dialogs[dialogs.length - 1];
+  if (!dialog) return {ready: false, rows: []};
+  const table = dialog.querySelector('table');
+  const rows = Array.from(table.querySelectorAll('tbody tr')).map((row) => {
+    const cells = Array.from(row.querySelectorAll('td'));
+    const item = clean(cells[1] && cells[1].innerText);
+    const quantityCell = cells[3];
+    const quantity = clean(quantityCell && quantityCell.querySelector('input') && quantityCell.querySelector('input').value);
+    const unit = clean(quantityCell && quantityCell.innerText);
+    return {item, quantity, unit};
+  }).filter((row) => row.item && row.quantity && row.unit);
+  return {ready: rows.length > 0, rows};
+})()
+""".strip()
+CLOSE_WORKAREA_SCRIPT = r"""
+(() => {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter((el) => {
+    const rect = el.getBoundingClientRect(); return rect.width > 0 && rect.height > 0;
+  });
+  const dialog = dialogs[dialogs.length - 1];
+  const button = dialog && Array.from(dialog.querySelectorAll('button')).find((el) => clean(el.innerText) === 'Close');
+  if (button) button.click();
+  return Boolean(button);
 })()
 """.strip()
 PROJECT_LABOR_SUMMARY_SCRIPT = r"""
@@ -527,6 +598,11 @@ class CDPClient:
             EXTRACT_PAGE_SCRIPT,
             DASHBOARD_LABOR_JOBS_SCRIPT,
             SOLD_JOBS_SCRIPT,
+            PROJECT_PLAN_SCRIPT,
+            WORKAREA_CARDS_SCRIPT,
+            NEXT_WORKAREA_SCRIPT,
+            WORKAREA_ITEMS_SCRIPT,
+            CLOSE_WORKAREA_SCRIPT,
             PROJECT_LABOR_SUMMARY_SCRIPT,
             READY_STATE_SCRIPT,
             LOCATION_SCRIPT,
@@ -572,7 +648,11 @@ def _wait_for_constant(
     deadline = time.monotonic() + timeout
     last: Any = None
     while time.monotonic() < deadline:
-        last = client.evaluate_constant(expression)
+        try:
+            last = client.evaluate_constant(expression)
+        except RuntimeError:
+            time.sleep(0.25)
+            continue
         if predicate(last):
             return last
         time.sleep(0.25)
@@ -825,6 +905,74 @@ class SynkedUPBrowser:
             }
         finally:
             controller.close()
+
+    def sold_job_materials(self, job_number: str) -> dict[str, Any]:
+        """Read estimated source quantities from every work area on a verified sold job."""
+        job_number = job_number.strip().upper()
+        if not re.fullmatch(r"[A-Z]{1,5}-[0-9]{1,8}", job_number):
+            raise ValueError("query must be one exact sold job number, for example AY-863")
+        sold = self.sold_jobs()
+        candidates = sold.get("tables", [{}])[0].get("rows", [])
+        match = next((row for row in candidates if row and str(row[0]).strip().upper() == job_number), None)
+        if not match:
+            raise ValueError("job number is not in the live SOLD JOB REVENUE panel")
+        href = str(match[-1])
+        _validate_dashboard_project_url(href, self.origin)
+        controller = CDPClient()
+        worker = controller
+        rows: list[list[str]] = []
+        try:
+            controller.connect(self.host)
+            dashboard_page = controller.navigate(f"{self.base_url}/dashboard", self.origin)
+            if _looks_logged_out(dashboard_page):
+                raise ReauthenticationRequired("authenticated SynkedUP session is required")
+            worker.command("Page.navigate", {"url": href, "transitionType": "typed"})
+            time.sleep(2.0)
+            plan = _wait_for_constant(
+                worker, PROJECT_PLAN_SCRIPT,
+                lambda value: isinstance(value, dict) and bool(value.get("ready")),
+            )
+            if not isinstance(plan, dict) or not plan.get("ready"):
+                raise RuntimeError("project plan did not load")
+            cards = _wait_for_constant(
+                worker, WORKAREA_CARDS_SCRIPT,
+                lambda value: isinstance(value, list) and bool(value),
+            )
+            if not isinstance(cards, list):
+                raise RuntimeError("project work areas did not load")
+            for _ in cards[:50]:
+                name = str(worker.evaluate_constant(NEXT_WORKAREA_SCRIPT) or "")[:500]
+                if not name:
+                    break
+                items = _wait_for_constant(
+                    worker, WORKAREA_ITEMS_SCRIPT,
+                    lambda value: isinstance(value, dict) and bool(value.get("ready")),
+                )
+                if isinstance(items, dict):
+                    for item in items.get("rows", [])[:MAX_RESULT_ROWS]:
+                        rows.append([
+                            name,
+                            str(item.get("item", ""))[:1000],
+                            str(item.get("quantity", ""))[:100],
+                            str(item.get("unit", ""))[:200],
+                        ])
+                worker.evaluate_constant(CLOSE_WORKAREA_SCRIPT)
+                time.sleep(0.25)
+        finally:
+            controller.close()
+        return {
+            "url": href,
+            "title": f"Sold job materials {job_number}",
+            "headings": [job_number, str(match[1])[:500]],
+            "alerts": ["Quantities are estimated source quantities. Do not convert them or treat them as order quantities without an approved rule."],
+            "tables": [{"headers": ["Work area", "Item", "Estimated quantity", "Source unit"], "rows": rows[:MAX_RESULT_ROWS]}],
+            "fields": [
+                {"label": "Sold status source", "value": "SynkedUP SOLD JOB REVENUE panel and project detail"},
+                {"label": "Project URL", "value": href},
+            ],
+            "cards": [],
+            "links": [],
+        }
 
     def labor_variance(self, *, include_financial: bool = False) -> dict[str, Any]:
         cached = _load_full_scan_cache(
@@ -1357,6 +1505,8 @@ def _execute_read(
             browser = SynkedUPBrowser()
             if spec.name == "synkedup_sold_jobs":
                 raw = browser.sold_jobs()
+            elif spec.name == "synkedup_sold_job_materials":
+                raw = browser.sold_job_materials(query)
             elif spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
                 raw = browser.labor_variance(include_financial=spec.name == "synkedup_job_costing")
                 if record_id:
@@ -1367,7 +1517,7 @@ def _execute_read(
             else:
                 raw = browser.read(spec, record_id=record_id)
         filtered = _filter_page(raw, spec.access_class)
-        local_query = query
+        local_query = "" if spec.name == "synkedup_sold_job_materials" else query
         if spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
             if _apply_dashboard_status_filter(filtered, query):
                 local_query = ""

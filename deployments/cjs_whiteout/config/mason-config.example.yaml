@@ -126,6 +126,7 @@ mcp_servers:
         synkedup-operations-read:
         - synkedup_jobs
         - synkedup_sold_jobs
+        - synkedup_sold_job_materials
         - synkedup_job_briefs
         - synkedup_maintenance
         - synkedup_service_tickets
