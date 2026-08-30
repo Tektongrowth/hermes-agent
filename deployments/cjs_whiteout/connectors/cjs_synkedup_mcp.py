@@ -41,6 +41,7 @@ MAX_QUERY_LENGTH = 100
 MAX_RECORD_ID_LENGTH = 80
 MAX_RESULT_ROWS = 100
 MAX_SOLD_MATERIAL_ROWS = 500
+MAX_PAGE_SIZE = 500
 SOLD_MATERIAL_CACHE_MAX_AGE_SECONDS = 600
 MAX_RESPONSE_CHARS = 120_000
 MAX_REQUESTS_PER_MINUTE = 30
@@ -103,7 +104,7 @@ SALES_HIDDEN_TERMS = frozenset(
 )
 
 mcp = FastMCP("CJS SynkedUP Read Only")
-StrictPageSize = Annotated[int, Field(strict=True, ge=1, le=MAX_RESULT_ROWS)]
+StrictPageSize = Annotated[int, Field(strict=True, ge=1, le=MAX_PAGE_SIZE)]
 StrictCursor = Annotated[int, Field(strict=True, ge=0, le=100_000)]
 
 

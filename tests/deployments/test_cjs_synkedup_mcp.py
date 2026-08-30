@@ -101,7 +101,7 @@ def test_fastmcp_schema_exposes_only_bounded_read_filters():
                 "page_size",
                 "cursor",
             }
-            assert tool.parameters["properties"]["page_size"]["maximum"] == 100
+            assert tool.parameters["properties"]["page_size"]["maximum"] == 500
             assert tool.parameters["properties"]["cursor"]["minimum"] == 0
 
 
