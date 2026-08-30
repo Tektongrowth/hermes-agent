@@ -325,7 +325,10 @@ WORKAREA_ITEMS_SCRIPT = r"""
     const unit = clean(quantityCell && quantityCell.innerText);
     return {item, quantity, unit};
   }).filter((row) => row.item && row.quantity && row.unit);
-  return {ready: rows.length > 0, rows};
+  // A visible work-area table with zero material rows is a complete empty result,
+  // not an unloaded dialog. Waiting for rows here turns valid empty areas into
+  // 25-second timeouts and can block the gateway heartbeat across multi-job reads.
+  return {ready: true, rows};
 })()
 """.strip()
 CLOSE_WORKAREA_SCRIPT = r"""
