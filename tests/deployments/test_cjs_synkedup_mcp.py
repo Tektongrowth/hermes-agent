@@ -384,6 +384,40 @@ def test_workarea_unit_extraction_uses_full_dom_text():
     assert "quantityCell.innerText" not in synkedup.WORKAREA_ITEMS_SCRIPT
 
 
+def test_sold_material_pagination_reuses_same_recent_live_scan(monkeypatch):
+    calls = []
+    raw = {
+        "url": "https://app.synkedup.com/#!/projects/1-test",
+        "title": "Sold job materials AY-859",
+        "headings": ["AY-859"],
+        "alerts": [],
+        "tables": [{
+            "headers": ["Work area", "Item", "Estimated quantity", "Source unit"],
+            "rows": [["Area", f"Item {i}", "1", "Each"] for i in range(3)],
+        }],
+        "fields": [],
+        "cards": [],
+        "links": [],
+    }
+
+    def sold_job_materials(_self, job_number):
+        calls.append(job_number)
+        return raw
+
+    monkeypatch.setattr(synkedup.SynkedUPBrowser, "sold_job_materials", sold_job_materials)
+    monkeypatch.setattr(synkedup, "_RATE_LIMITER", SimpleNamespace(acquire=lambda: None))
+    monkeypatch.setattr(synkedup, "_AUDIT", SimpleNamespace(write=lambda **_kwargs: None))
+    synkedup._SOLD_MATERIAL_CACHE.clear()
+    spec = synkedup.TOOL_SPEC_BY_NAME["synkedup_sold_job_materials"]
+
+    first = synkedup._execute_read(spec, query="AY-859", page_size=2, cursor=0)
+    second = synkedup._execute_read(spec, query="AY-859", page_size=2, cursor=2)
+
+    assert calls == ["AY-859"]
+    assert first["data"]["pagination"]["has_more"] is True
+    assert second["data"]["tables"][0]["rows"] == [["Area", "Item 2", "1", "Each"]]
+
+
 def test_dashboard_project_links_are_same_origin_bounded_hash_routes():
     origin = "https://app.synkedup.test"
     synkedup._validate_dashboard_project_url(

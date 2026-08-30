@@ -10,6 +10,7 @@ adds read-only browser and response boundaries underneath that policy.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -40,6 +41,7 @@ MAX_QUERY_LENGTH = 100
 MAX_RECORD_ID_LENGTH = 80
 MAX_RESULT_ROWS = 100
 MAX_SOLD_MATERIAL_ROWS = 500
+SOLD_MATERIAL_CACHE_MAX_AGE_SECONDS = 600
 MAX_RESPONSE_CHARS = 120_000
 MAX_REQUESTS_PER_MINUTE = 30
 MIN_REQUEST_INTERVAL_SECONDS = 0.20
@@ -1251,6 +1253,7 @@ class SynkedUPBrowser:
 _EXECUTION_LOCK = threading.Lock()
 _RATE_LIMITER = SlidingRateLimiter()
 _AUDIT = AuditLogger()
+_SOLD_MATERIAL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _validate_base_url(value: str) -> tuple[str, str]:
@@ -1532,7 +1535,19 @@ def _execute_read(
             if spec.name == "synkedup_sold_jobs":
                 raw = browser.sold_jobs()
             elif spec.name == "synkedup_sold_job_materials":
-                raw = browser.sold_job_materials(query)
+                cached = _SOLD_MATERIAL_CACHE.get(query)
+                if (
+                    cursor > 0
+                    and cached is not None
+                    and time.monotonic() - cached[0] <= SOLD_MATERIAL_CACHE_MAX_AGE_SECONDS
+                ):
+                    raw = copy.deepcopy(cached[1])
+                else:
+                    raw = browser.sold_job_materials(query)
+                    _SOLD_MATERIAL_CACHE[query] = (
+                        time.monotonic(),
+                        copy.deepcopy(raw),
+                    )
             elif spec.name in {"synkedup_labor_variance", "synkedup_job_costing"}:
                 raw = browser.labor_variance(include_financial=spec.name == "synkedup_job_costing")
                 if record_id:
