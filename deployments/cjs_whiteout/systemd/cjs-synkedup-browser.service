@@ -32,7 +32,7 @@ AmbientCapabilities=
 UMask=0077
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 TasksMax=256
-MemoryMax=2G
+MemoryMax=4G
 
 [Install]
 WantedBy=multi-user.target
