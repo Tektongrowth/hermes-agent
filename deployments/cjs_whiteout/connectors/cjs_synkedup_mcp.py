@@ -969,7 +969,10 @@ class SynkedUPBrowser:
                 # Release large project-plan renderers between sold-job calls. Some
                 # SynkedUP plans retain enough client-side state to exhaust the
                 # browser lane when Mason reads several jobs sequentially.
-                controller.command("Page.navigate", {"url": "about:blank", "transitionType": "typed"})
+                controller.command(
+                    "Page.navigate",
+                    {"url": f"{self.base_url}/dashboard", "transitionType": "typed"},
+                )
             except Exception:
                 pass
             controller.close()
