@@ -962,6 +962,13 @@ class SynkedUPBrowser:
                 worker.evaluate_constant(CLOSE_WORKAREA_SCRIPT)
                 time.sleep(0.25)
         finally:
+            try:
+                # Release large project-plan renderers between sold-job calls. Some
+                # SynkedUP plans retain enough client-side state to exhaust the
+                # browser lane when Mason reads several jobs sequentially.
+                controller.command("Page.navigate", {"url": "about:blank", "transitionType": "typed"})
+            except Exception:
+                pass
             controller.close()
         return {
             "url": href,
