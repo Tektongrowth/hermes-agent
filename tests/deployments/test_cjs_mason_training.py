@@ -119,6 +119,9 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "Do not make an automatic hiring or rejection decision",
         "Eligible for review",
         "Match against existing leads",
+        "Payroll overtime and PTO tracking",
+        "Total SynkedUP time without an overtime/PTO split is not a valid substitute",
+        "Ask for the schedule only after the source is confirmed",
     ]:
         assert phrase in workforce
 
