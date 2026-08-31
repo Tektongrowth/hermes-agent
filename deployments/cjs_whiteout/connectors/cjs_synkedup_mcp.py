@@ -1000,7 +1000,9 @@ class SynkedUPBrowser:
         )
         if cached is not None:
             return cached
-        dashboard_url = f"{self.base_url}/dashboard"
+        # SynkedUP's dashboard is an Angular hash route. Navigating to bare
+        # /dashboard can leave the authenticated shell blank with no job panel.
+        dashboard_url = f"{self.base_url}/dashboard#!/"
         controller = CDPClient()
         worker = CDPClient()
         target_id = ""
