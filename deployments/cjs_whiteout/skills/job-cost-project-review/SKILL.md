@@ -14,7 +14,7 @@ Use this skill only inside the CJS Landscape and Whiteout Winter Services tenant
 ## Workflow
 
 1. Call synkedup_job_costing with exactly status:completed for completed dashboard jobs.
-2. Find the exact 2026 Project Review Sheet in CJS Drive.
+2. Find the exact 2026 Project Review Sheet in CJS Drive. For `GOOGLEDRIVE_FIND_FILE`, use `q: "name contains 'Project Review Sheet' and trashed = false"`. Never use `title`; Google Drive's filename field is `name`, and Composio may convert invalid fields into a literal full-text search that returns no files.
 3. Read matching rows by passing every completed SynkedUP job number to composio_read_drive_spreadsheet.
 4. Compare Estimated Hours, Actual Hours, Final Net Profit %, Final Net Profit $, and Final Total in that order.
 5. Normalize equivalent numeric formatting but report every real numeric mismatch, including zero and small decimal differences.
