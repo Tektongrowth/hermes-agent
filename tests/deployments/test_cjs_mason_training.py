@@ -98,6 +98,9 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
         "Preserve prior contract and design versions",
         "final sold scope plus approved change orders",
         "check every change ID",
+        "treat that as a workflow setup request",
+        "create two reusable versions",
+        "ask for the smallest missing prerequisite",
     ]:
         assert phrase in changes
 
