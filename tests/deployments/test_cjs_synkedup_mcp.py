@@ -150,6 +150,9 @@ def test_base_url_is_fixed_https_origin(url):
 
 def test_navigation_blocks_cross_origin_and_mutation_paths():
     origin = "https://app.synkedup.test"
+    synkedup._validate_navigation_url(origin + "/dashboard#!/", origin)
+    with pytest.raises(synkedup.SecurityViolation):
+        synkedup._validate_navigation_url(origin + "/dashboard#!javascript:alert(1)", origin)
     with pytest.raises(synkedup.SecurityViolation):
         synkedup._validate_navigation_url("https://evil.test/jobs", origin)
     for path in (

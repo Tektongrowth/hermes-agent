@@ -1281,7 +1281,11 @@ def _validate_navigation_url(value: str, expected_origin: str) -> None:
     decoded_target = urllib.parse.unquote(parsed.path + "?" + parsed.query)
     if MUTATION_SEGMENT_RE.search(decoded_target):
         raise SecurityViolation("mutation navigation refused")
-    if parsed.fragment:
+    if parsed.fragment and not (
+        parsed.path == "/dashboard"
+        and not parsed.query
+        and parsed.fragment == "!/"
+    ):
         raise SecurityViolation("fragment navigation refused")
 
 
