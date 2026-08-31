@@ -44,6 +44,23 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
     review = (skills_root / "job-cost-project-review" / "SKILL.md").read_text()
     assert "Never state a count that differs from the number of jobs actually listed" in review
 
+    hit_lists = (skills_root / "hit-lists-reminders" / "SKILL.md").read_text()
+    for phrase in [
+        "call `todo` before writing any user-facing answer",
+        "authoritative saved state",
+        "Never claim a list mutation succeeded before the tool confirms it",
+    ]:
+        assert phrase in hit_lists
+
+    soul = (ROOT / "SOUL.md").read_text()
+    for phrase in [
+        "Send exactly one user-facing answer per request",
+        "send only the tool call with no draft",
+        "Never announce that a skill was loaded",
+        "treat its returned state as authoritative",
+    ]:
+        assert phrase in soul
+
     lookup = (skills_root / "cjs-job-lookup" / "SKILL.md").read_text()
     assert "Do not stop at the first empty or partial match" in lookup
     assert "00 - Sold YYYY" in lookup
