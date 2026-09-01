@@ -141,6 +141,7 @@ def test_only_reviewed_cjs_skills_are_deployed() -> None:
 
 def test_mason_config_enables_skills_for_alyssa_without_generic_toolsets() -> None:
     config = yaml.safe_load((ROOT / "config" / "mason-config.example.yaml").read_text())
+    assert config["model"] == {"provider": "openrouter", "default": "google/gemini-3.7-flash"}
     assert "skills" not in config["agent"]["disabled_toolsets"]
     alyssa = config["platform_principal_toolsets"]["discord"]["users"]["1541580058152665199"]
     assert "skills" in alyssa
