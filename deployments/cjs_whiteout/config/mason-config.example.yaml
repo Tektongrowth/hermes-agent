@@ -104,6 +104,8 @@ mcp_servers:
         - composio_read_drive_pdf
         - composio_read_drive_text_document
         - composio_read_drive_spreadsheet
+        - cjs_read_discord_pdf
+        - cjs_create_walkthrough_pdfs
         - composio_execute
   cjs-synkedup:
     url: http://127.0.0.1:9342/mcp

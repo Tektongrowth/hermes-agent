@@ -44,12 +44,13 @@ Use these stages only when the business has adopted them: New Request, Site Info
 
 When Alyssa asks to set up walkthrough sheets for future sold projects, treat that as a workflow setup request, not casual planning.
 
-1. Check whether the sign-off template and exact official Google review URL are already available in the current message or approved Drive sources.
+1. Check whether the sign-off template and exact official Google review URL are already available in the current message or approved Drive sources. A PDF attached in Discord is the supplied template. Read it with `cjs_read_discord_pdf`; do not ignore it, search for a replacement, or ask Alyssa to upload it again.
 2. If either is missing, ask only for the missing item. Do not say the workflow is set up, do not ask her to repeat the whole request, and do not ask for a sold job number until the reusable template is ready.
 3. Once both are available, create two reusable versions from the same approved template: one with the verified review QR code and one without it. Preserve the original template.
 4. Verify both created files by reading them back. Report their exact names and Drive location. Creating or storing these files requires the normal confirmation gate when applicable.
 5. After setup, each project run starts from one exact sold job number. Pull the final sold scope plus approved change orders, populate one line per verified work area, and produce the two project-specific print choices.
 6. Never respond only with praise, a restatement, or a promise to help later. Either complete the setup with the available inputs or ask for the smallest missing prerequisite.
+7. For a scanned PDF cleanup request, inspect every page first. Pass only the visually confirmed staple rectangle to `cjs_create_walkthrough_pdfs`, preserve the source, and return the generated no-QR and QR PDFs using the tool's exact `MEDIA:` lines. If the official review URL is the only missing input, still create and return the cleaned no-QR PDF, then ask only for that URL.
 
 ## Final billing reconciliation
 

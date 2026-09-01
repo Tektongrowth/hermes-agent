@@ -672,3 +672,36 @@ def test_pdf_reader_is_wired_into_mason_config_and_instructions():
     assert "call `vision_analyze` on every page" in soul
     assert "Use `composio_read_drive_text_document`" in soul
     assert "Use `composio_read_drive_spreadsheet`" in soul
+    assert config.count("- cjs_read_discord_pdf") == 1
+    assert config.count("- cjs_create_walkthrough_pdfs") == 1
+    assert "use `cjs_read_discord_pdf`" in soul
+    assert "call `cjs_create_walkthrough_pdfs`" in soul
+
+
+def test_discord_pdf_download_rejects_unapproved_channel(tmp_path):
+    with pytest.raises(bridge.BridgeRequestError, match="approved CJS Discord channel"):
+        bridge._download_discord_pdf(
+            "https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/file.pdf",
+            tmp_path / "file.pdf",
+        )
+
+
+def test_create_walkthrough_pdfs_outputs_both_versions(monkeypatch, tmp_path):
+    source = tmp_path / "source.pdf"
+    bridge.Image.new("RGB", (800, 1100), "white").save(source, "PDF", resolution=100)
+
+    def copy_source(_url, destination):
+        destination.write_bytes(source.read_bytes())
+
+    monkeypatch.setattr(bridge, "_download_discord_pdf", copy_source)
+    monkeypatch.setenv("CJS_MASON_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    result = bridge.cjs_create_walkthrough_pdfs(
+        "https://cdn.discordapp.com/attachments/1539071026665885736/222222222222222222/file.pdf",
+        [0.01, 0.01, 0.08, 0.06],
+        "https://example.com/review",
+    )
+
+    assert Path(result["no_qr_pdf"]).is_file()
+    assert Path(result["with_qr_pdf"]).is_file()
+    assert result["needs_official_review_url"] is False
+    assert result["source_preserved"] is True
